@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "Bash(where cargo:*)",
+      "Bash(curl:*)",
+      "Bash(cargo:*)",
+      "Bash(export:*)",
+      "Bash(npm create:*)",
+      "Bash(npm install:*)",
+      "Bash(tasklist:*)",
+      "Bash(timeout 5 ./screenshot-client.exe:*)",
+      "Bash(start:*)",
+      "Bash(powershell:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(gh:*)"
+    ]
+  }
+}
