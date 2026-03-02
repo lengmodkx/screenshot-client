@@ -1,6 +1,18 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
+// Mock data for browser preview
+const MOCK_CONFIG = {
+  interval: 10,
+  mode: "cloud",
+  local_path: "C:/Screenshots",
+  api_url: "http://localhost:8080",
+  token: "mock-token-123",
+  username: "admin",
+  auto_start: false,
+  retention_days: 7
+};
+
 interface AppConfig {
   interval: number;
   mode: string;
@@ -12,11 +24,16 @@ interface AppConfig {
   retention_days: number;
 }
 
+interface Stats {
+  todayCount: number;
+  lastCaptureTime: string | null;
+}
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [currentImage, setCurrentImage] = useState<string | null>(null);
-  const [lastSaveTime, setLastSaveTime] = useState<string | null>(null);
+  const [stats, setStats] = useState<Stats>({ todayCount: 0, lastCaptureTime: null });
   const [showSettings, setShowSettings] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [username, setUsername] = useState("");
@@ -26,7 +43,6 @@ function App() {
   const [statusMessage, setStatusMessage] = useState("");
   const timerRef = useRef<number | null>(null);
 
-  // 加载配置
   useEffect(() => {
     loadConfig();
     checkNetwork();
@@ -34,7 +50,6 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // 定时截图
   useEffect(() => {
     if (isRunning && config) {
       startScreenshot();
@@ -62,7 +77,9 @@ function App() {
         setIsRunning(true);
       }
     } catch (e) {
-      console.error("Failed to load config:", e);
+      console.error("Failed to load config, using mock:", e);
+      // Use mock config in browser preview mode
+      setConfig(MOCK_CONFIG);
     }
   };
 
@@ -84,23 +101,26 @@ function App() {
       setCurrentImage(imageData);
 
       const now = new Date();
-      setLastSaveTime(now.toLocaleTimeString());
+      const timeStr = now.toLocaleTimeString();
+      setStats(prev => ({
+        todayCount: prev.todayCount + 1,
+        lastCaptureTime: timeStr
+      }));
 
       if (config.mode === "cloud" && config.token && isOnline) {
         try {
           await invoke("upload_screenshot", { imageData });
-          setStatusMessage(`已上传 - ${now.toLocaleTimeString()}`);
+          setStatusMessage(`已上传 - ${timeStr}`);
         } catch (e) {
           console.error("Upload failed, saving locally:", e);
           await saveLocally(imageData);
-          setStatusMessage(`上传失败，已保存本地 - ${now.toLocaleTimeString()}`);
+          setStatusMessage(`上传失败，已保存本地 - ${timeStr}`);
         }
       } else {
         await saveLocally(imageData);
-        setStatusMessage(`已保存本地 - ${now.toLocaleTimeString()}`);
+        setStatusMessage(`已保存本地 - ${timeStr}`);
       }
 
-      // 清理旧文件
       await invoke("cleanup_old_files");
     } catch (e) {
       console.error("Screenshot failed:", e);
@@ -171,51 +191,109 @@ function App() {
     <div className="app">
       <header className="header">
         <h1>截图客户端</h1>
-        <div className="status-indicator">
+        <div className="status-badge">
           <span className={`status-dot ${isOnline ? 'online' : 'offline'}`}></span>
           <span>{isOnline ? '在线' : '离线'}</span>
         </div>
       </header>
 
       <main className="main">
-        <div className="preview">
-          {currentImage ? (
-            <img src={currentImage} alt="预览" />
-          ) : (
-            <div className="preview-placeholder">
-              点击"开始"启动截图
+        {/* 状态卡片 */}
+        <div className="card status-card">
+          <div className="card-header">
+            <span className="card-icon">●</span>
+            <span className="card-title">运行状态</span>
+          </div>
+          <div className="card-content">
+            <div className="status-row">
+              <span className="label">当前状态</span>
+              <span className={`value ${isRunning ? 'running' : 'stopped'}`}>
+                {isRunning ? '工作中' : '已停止'}
+              </span>
             </div>
-          )}
+            <div className="status-row">
+              <span className="label">存储模式</span>
+              <span className="value">{config.mode === 'cloud' ? '云端上传' : '本地保存'}</span>
+            </div>
+            <div className="status-row">
+              <span className="label">截图间隔</span>
+              <span className="value">{config.interval}秒</span>
+            </div>
+            {config.username && (
+              <div className="status-row">
+                <span className="label">登录用户</span>
+                <span className="value">{config.username}</span>
+              </div>
+            )}
+          </div>
         </div>
 
-        <div className="info">
-          <p>模式: {config.mode === 'cloud' ? '云端上传' : '本地保存'}</p>
-          <p>间隔: {config.interval}秒</p>
-          {config.username && <p>用户: {config.username}</p>}
-          {lastSaveTime && <p>最后保存: {lastSaveTime}</p>}
-          {statusMessage && <p className="status-msg">{statusMessage}</p>}
+        {/* 统计卡片 */}
+        <div className="card stats-card">
+          <div className="card-header">
+            <span className="card-icon">📊</span>
+            <span className="card-title">今日统计</span>
+          </div>
+          <div className="card-content">
+            <div className="stat-item">
+              <span className="stat-value">{stats.todayCount}</span>
+              <span className="stat-label">今日截图</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-value">{stats.lastCaptureTime || '--'}</span>
+              <span className="stat-label">最后截图</span>
+            </div>
+          </div>
         </div>
 
-        <div className="controls">
-          <button
-            className={`btn ${isRunning ? 'stop' : 'start'}`}
-            onClick={toggleRunning}
-          >
-            {isRunning ? '停止' : '开始'}
-          </button>
-          <button className="btn capture" onClick={manualCapture}>
-            立即截图
-          </button>
+        {/* 预览卡片 */}
+        <div className="card preview-card">
+          <div className="card-header">
+            <span className="card-icon">🖼️</span>
+            <span className="card-title">最新截图</span>
+          </div>
+          <div className="card-content">
+            <div className="preview-thumb">
+              {currentImage ? (
+                <img src={currentImage} alt="预览" />
+              ) : (
+                <div className="preview-placeholder">
+                  暂无截图
+                </div>
+              )}
+            </div>
+            {statusMessage && <div className="status-msg">{statusMessage}</div>}
+          </div>
         </div>
 
-        <div className="actions">
-          <button onClick={() => setShowSettings(true)}>设置</button>
-          {config.mode === 'cloud' && !config.token && (
-            <button onClick={() => setShowLogin(true)}>登录</button>
-          )}
-          {config.token && (
-            <button onClick={handleLogout}>登出</button>
-          )}
+        {/* 控制卡片 */}
+        <div className="card control-card">
+          <div className="card-header">
+            <span className="card-icon">⚙️</span>
+            <span className="card-title">控制面板</span>
+          </div>
+          <div className="card-content">
+            <div className="controls">
+              <button
+                className={`btn ${isRunning ? 'stop' : 'start'}`}
+                onClick={toggleRunning}
+              >
+                {isRunning ? '■ 停止' : '▶ 开始'}
+              </button>
+              <button className="btn capture" onClick={manualCapture}>
+                📷 截图
+              </button>
+            </div>
+            <div className="actions">
+              <button onClick={() => setShowSettings(true)}>设置</button>
+              {config.mode === 'cloud' && !config.token && (
+                <button onClick={() => setShowLogin(true)}>登录</button>
+              )}
+              {config.token && (
+                <button onClick={handleLogout}>登出</button>
+              )}
+            </div>
+          </div>
         </div>
       </main>
 
