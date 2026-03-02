@@ -78,7 +78,6 @@ function App() {
       }
     } catch (e) {
       console.error("Failed to load config, using mock:", e);
-      // Use mock config in browser preview mode
       setConfig(MOCK_CONFIG);
     }
   };
@@ -189,113 +188,95 @@ function App() {
 
   return (
     <div className="app">
-      <header className="header">
+      {/* 顶部状态栏 */}
+      <div className="top-bar">
         <h1>截图客户端</h1>
         <div className="status-badge">
           <span className={`status-dot ${isOnline ? 'online' : 'offline'}`}></span>
           <span>{isOnline ? '在线' : '离线'}</span>
         </div>
-      </header>
+      </div>
 
-      <main className="main">
-        {/* 状态卡片 */}
-        <div className="card status-card">
-          <div className="card-header">
-            <span className="card-icon">●</span>
-            <span className="card-title">运行状态</span>
+      {/* 主控制按钮 - 大大居中 */}
+      <div className="main-controls">
+        <button
+          className={`btn-large ${isRunning ? 'btn-stop' : 'btn-start'}`}
+          onClick={toggleRunning}
+        >
+          {isRunning ? '■ 停止' : '▶ 开始'}
+        </button>
+        <button className="btn-large btn-capture" onClick={manualCapture}>
+          📷 截图
+        </button>
+      </div>
+
+      {/* 副按钮 */}
+      <div className="secondary-controls">
+        <button className="btn-small" onClick={() => setShowSettings(true)}>
+          ⚙️ 设置
+        </button>
+        {config.mode === 'cloud' && !config.token && (
+          <button className="btn-small" onClick={() => setShowLogin(true)}>
+            🔐 登录
+          </button>
+        )}
+        {config.token && (
+          <button className="btn-small" onClick={handleLogout}>
+            🚪 登出
+          </button>
+        )}
+      </div>
+
+      {/* 信息展示区 */}
+      <div className="info-section">
+        <div className="info-row">
+          <span className="info-label">运行状态</span>
+          <span className="info-value" style={{ color: isRunning ? '#2e7d32' : '#9e9e9e' }}>
+            {isRunning ? '工作中' : '已停止'}
+          </span>
+        </div>
+        <div className="info-row">
+          <span className="info-label">存储模式</span>
+          <span className="info-value">{config.mode === 'cloud' ? '云端上传' : '本地保存'}</span>
+        </div>
+        <div className="info-row">
+          <span className="info-label">截图间隔</span>
+          <span className="info-value">{config.interval} 秒</span>
+        </div>
+        {config.username && (
+          <div className="info-row">
+            <span className="info-label">登录用户</span>
+            <span className="info-value">{config.username}</span>
           </div>
-          <div className="card-content">
-            <div className="status-row">
-              <span className="label">当前状态</span>
-              <span className={`value ${isRunning ? 'running' : 'stopped'}`}>
-                {isRunning ? '工作中' : '已停止'}
-              </span>
-            </div>
-            <div className="status-row">
-              <span className="label">存储模式</span>
-              <span className="value">{config.mode === 'cloud' ? '云端上传' : '本地保存'}</span>
-            </div>
-            <div className="status-row">
-              <span className="label">截图间隔</span>
-              <span className="value">{config.interval}秒</span>
-            </div>
-            {config.username && (
-              <div className="status-row">
-                <span className="label">登录用户</span>
-                <span className="value">{config.username}</span>
-              </div>
+        )}
+      </div>
+
+      {/* 统计区 */}
+      <div className="stats-section">
+        <div className="stat-card">
+          <div className="stat-number">{stats.todayCount}</div>
+          <div className="stat-label">今日截图</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-number">{stats.lastCaptureTime || '--:--:--'}</div>
+          <div className="stat-label">最后截图</div>
+        </div>
+      </div>
+
+      {/* 预览区 */}
+      <div className="preview-section">
+        <div className="preview-header">🖼️ 最新截图</div>
+        <div className="preview-body">
+          <div className="preview-image">
+            {currentImage ? (
+              <img src={currentImage} alt="预览" />
+            ) : (
+              <div className="preview-placeholder">暂无截图</div>
             )}
           </div>
+          {statusMessage && <div className="status-text">{statusMessage}</div>}
         </div>
-
-        {/* 统计卡片 */}
-        <div className="card stats-card">
-          <div className="card-header">
-            <span className="card-icon">📊</span>
-            <span className="card-title">今日统计</span>
-          </div>
-          <div className="card-content">
-            <div className="stat-item">
-              <span className="stat-value">{stats.todayCount}</span>
-              <span className="stat-label">今日截图</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-value">{stats.lastCaptureTime || '--'}</span>
-              <span className="stat-label">最后截图</span>
-            </div>
-          </div>
-        </div>
-
-        {/* 预览卡片 */}
-        <div className="card preview-card">
-          <div className="card-header">
-            <span className="card-icon">🖼️</span>
-            <span className="card-title">最新截图</span>
-          </div>
-          <div className="card-content">
-            <div className="preview-thumb">
-              {currentImage ? (
-                <img src={currentImage} alt="预览" />
-              ) : (
-                <div className="preview-placeholder">
-                  暂无截图
-                </div>
-              )}
-            </div>
-            {statusMessage && <div className="status-msg">{statusMessage}</div>}
-          </div>
-        </div>
-
-        {/* 控制卡片 */}
-        <div className="card control-card">
-          <div className="card-header">
-            <span className="card-icon">⚙️</span>
-            <span className="card-title">控制面板</span>
-          </div>
-          <div className="card-content">
-            <div className="controls">
-              <button
-                className={`btn ${isRunning ? 'stop' : 'start'}`}
-                onClick={toggleRunning}
-              >
-                {isRunning ? '■ 停止' : '▶ 开始'}
-              </button>
-              <button className="btn capture" onClick={manualCapture}>
-                📷 截图
-              </button>
-            </div>
-            <div className="actions">
-              <button onClick={() => setShowSettings(true)}>设置</button>
-              {config.mode === 'cloud' && !config.token && (
-                <button onClick={() => setShowLogin(true)}>登录</button>
-              )}
-              {config.token && (
-                <button onClick={handleLogout}>登出</button>
-              )}
-            </div>
-          </div>
-        </div>
-      </main>
+      </div>
 
       {/* 设置弹窗 */}
       {showSettings && (

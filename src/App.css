@@ -6,259 +6,254 @@
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #f0f4f0;
+  background: linear-gradient(180deg, #f5f7fa 0%, #e4e8ec 100%);
   color: #333;
+  min-height: 100vh;
 }
 
 .app {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  padding: 20px;
+  gap: 20px;
+  max-width: 480px;
+  margin: 0 auto;
 }
 
-.header {
-  background: linear-gradient(135deg, #2d5a3d 0%, #3d7a52 100%);
-  color: white;
-  padding: 14px 16px;
+/* 顶部状态栏 */
+.top-bar {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  padding: 18px 24px;
+  background: linear-gradient(135deg, #2e7d32 0%, #43a047 100%);
+  border-radius: 16px;
+  box-shadow: 0 4px 16px rgba(46, 125, 50, 0.3);
+  color: white;
 }
 
-.header h1 {
-  font-size: 16px;
+.top-bar h1 {
+  font-size: 20px;
   font-weight: 600;
 }
 
 .status-badge {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  background: rgba(255,255,255,0.15);
-  padding: 4px 10px;
-  border-radius: 12px;
+  gap: 8px;
+  font-size: 13px;
+  background: rgba(255,255,255,0.2);
+  padding: 6px 14px;
+  border-radius: 20px;
 }
 
 .status-dot {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
 }
 
 .status-dot.online {
-  background: #52c41a;
-  box-shadow: 0 0 6px #52c41a;
+  background: #81c784;
+  box-shadow: 0 0 8px #81c784;
 }
 
 .status-dot.offline {
-  background: #ff4d4f;
-  box-shadow: 0 0 6px #ff4d4f;
+  background: #ef9a9a;
+  box-shadow: 0 0 8px #ef9a9a;
 }
 
-.main {
-  flex: 1;
-  padding: 12px;
+/* 主控制按钮 - 大大居中 */
+.main-controls {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  overflow-y: auto;
-}
-
-.card {
+  gap: 16px;
+  padding: 24px;
   background: white;
-  border-radius: 12px;
-  overflow: hidden;
-  box-shadow: 0 2px 8px rgba(45, 90, 61, 0.08);
+  border-radius: 20px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.08);
 }
 
-.card-header {
-  background: linear-gradient(135deg, #e8f0e8 0%, #f5f9f5 100%);
-  padding: 10px 14px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-bottom: 1px solid #e0e8e0;
-}
-
-.card-icon {
-  font-size: 14px;
-}
-
-.card-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #2d5a3d;
-}
-
-.card-content {
-  padding: 12px 14px;
-}
-
-/* 状态卡片 */
-.status-card .card-content {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.status-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.status-row .label {
-  font-size: 12px;
-  color: #666;
-}
-
-.status-row .value {
-  font-size: 13px;
-  font-weight: 500;
-  color: #333;
-}
-
-.status-row .value.running {
-  color: #2d7a46;
-}
-
-.status-row .value.stopped {
-  color: #999;
-}
-
-/* 统计卡片 */
-.stats-card .card-content {
-  display: flex;
-  justify-content: space-around;
-}
-
-.stat-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-
-.stat-value {
+.btn-large {
+  flex: 1;
+  padding: 24px 32px;
+  border: none;
+  border-radius: 16px;
   font-size: 20px;
   font-weight: 700;
-  color: #2d5a3d;
-}
-
-.stat-label {
-  font-size: 11px;
-  color: #888;
-}
-
-/* 预览卡片 */
-.preview-card .card-content {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.preview-thumb {
-  height: 80px;
-  background: #f5f5f5;
-  border-radius: 8px;
-  overflow: hidden;
+  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 12px;
+  transition: all 0.2s;
 }
 
-.preview-thumb img {
+.btn-start {
+  background: linear-gradient(135deg, #43a047 0%, #66bb6a 100%);
+  color: white;
+  box-shadow: 0 6px 20px rgba(67, 160, 71, 0.4);
+}
+
+.btn-start:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(67, 160, 71, 0.5);
+}
+
+.btn-stop {
+  background: linear-gradient(135deg, #e53935 0%, #ef5350 100%);
+  color: white;
+  box-shadow: 0 6px 20px rgba(229, 57, 53, 0.4);
+}
+
+.btn-stop:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(229, 57, 53, 0.5);
+}
+
+.btn-capture {
+  background: linear-gradient(135deg, #1e88e5 0%, #42a5f5 100%);
+  color: white;
+  box-shadow: 0 6px 20px rgba(30, 136, 229, 0.4);
+}
+
+.btn-capture:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(30, 136, 229, 0.5);
+}
+
+/* 副按钮区 - 简洁行 */
+.secondary-controls {
+  display: flex;
+  gap: 12px;
+}
+
+.btn-small {
+  flex: 1;
+  padding: 14px 20px;
+  border: 2px solid #c8e6c9;
+  border-radius: 12px;
+  background: white;
+  font-size: 14px;
+  font-weight: 500;
+  color: #2e7d32;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.2s;
+}
+
+.btn-small:hover {
+  background: #f1f8e9;
+  border-color: #43a047;
+}
+
+/* 信息展示区 */
+.info-section {
+  background: white;
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+}
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.info-row:last-child {
+  border-bottom: none;
+}
+
+.info-label {
+  color: #757575;
+  font-size: 14px;
+}
+
+.info-value {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+/* 统计区 */
+.stats-section {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.stat-card {
+  background: linear-gradient(135deg, #f1f8e9 0%, #e8f5e9 100%);
+  border-radius: 16px;
+  padding: 24px;
+  text-align: center;
+}
+
+.stat-number {
+  font-size: 32px;
+  font-weight: 700;
+  color: #2e7d32;
+}
+
+.stat-label {
+  font-size: 13px;
+  color: #81c784;
+  margin-top: 6px;
+}
+
+/* 预览区 */
+.preview-section {
+  background: white;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+}
+
+.preview-header {
+  padding: 14px 20px;
+  background: linear-gradient(135deg, #f1f8e9 0%, #e8f5e9 100%);
+  font-size: 14px;
+  font-weight: 600;
+  color: #2e7d32;
+}
+
+.preview-body {
+  padding: 20px;
+}
+
+.preview-image {
+  height: 180px;
+  background: linear-gradient(135deg, #fafafa 0%, #f0f0f0 100%);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.preview-image img {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
 }
 
 .preview-placeholder {
-  color: #999;
-  font-size: 12px;
+  color: #bdbdbd;
+  font-size: 14px;
 }
 
-.status-msg {
-  font-size: 11px;
-  color: #2d7a46;
+.status-text {
+  margin-top: 14px;
+  padding: 12px;
+  background: #f1f8e9;
+  border-radius: 10px;
   text-align: center;
-}
-
-/* 控制卡片 */
-.control-card .card-content {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.controls {
-  display: flex;
-  gap: 10px;
-}
-
-.btn {
-  flex: 1;
-  padding: 10px;
-  border: none;
-  border-radius: 8px;
+  color: #43a047;
   font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
-
-.btn.start {
-  background: linear-gradient(135deg, #2d7a46 0%, #3d9a56 100%);
-  color: white;
-}
-
-.btn.start:hover {
-  background: linear-gradient(135deg, #256a3a 0%, #2d8a46 100%);
-}
-
-.btn.stop {
-  background: linear-gradient(135deg, #c0392b 0%, #e74c3c 100%);
-  color: white;
-}
-
-.btn.stop:hover {
-  background: linear-gradient(135deg, #a93226 0%, #c0392b 100%);
-}
-
-.btn.capture {
-  background: linear-gradient(135deg, #2d5a3d 0%, #3d7a52 100%);
-  color: white;
-}
-
-.btn.capture:hover {
-  background: linear-gradient(135deg, #254a33 0%, #2d6a42 100%);
-}
-
-.actions {
-  display: flex;
-  gap: 8px;
-}
-
-.actions button {
-  flex: 1;
-  padding: 8px;
-  border: 1px solid #d0e0d0;
-  border-radius: 6px;
-  background: white;
-  cursor: pointer;
-  font-size: 12px;
-  color: #2d5a3d;
-  transition: all 0.2s;
-}
-
-.actions button:hover {
-  background: #f0f8f0;
-  border-color: #2d7a52;
 }
 
 /* Loading */
@@ -267,7 +262,7 @@ body {
   align-items: center;
   justify-content: center;
   height: 100vh;
-  font-size: 14px;
+  font-size: 16px;
   color: #666;
 }
 
@@ -283,72 +278,79 @@ body {
   align-items: center;
   justify-content: center;
   z-index: 100;
+  backdrop-filter: blur(4px);
 }
 
 .modal-content {
   background: white;
-  border-radius: 12px;
-  padding: 20px;
+  border-radius: 20px;
+  padding: 28px;
   width: 90%;
-  max-width: 320px;
-  max-height: 80vh;
+  max-width: 380px;
+  max-height: 85vh;
   overflow-y: auto;
+  box-shadow: 0 24px 48px rgba(0,0,0,0.2);
 }
 
 .modal-content h2 {
-  font-size: 16px;
-  margin-bottom: 16px;
-  color: #2d5a3d;
+  font-size: 20px;
+  margin-bottom: 24px;
+  color: #2e7d32;
+  text-align: center;
+  font-weight: 600;
 }
 
 .form-group {
-  margin-bottom: 14px;
+  margin-bottom: 20px;
 }
 
 .form-group label {
   display: block;
-  font-size: 12px;
-  color: #666;
-  margin-bottom: 5px;
+  font-size: 14px;
+  color: #616161;
+  margin-bottom: 10px;
+  font-weight: 500;
 }
 
 .form-group input,
 .form-group select {
   width: 100%;
-  padding: 8px 10px;
-  border: 1px solid #d0e0d0;
-  border-radius: 6px;
-  font-size: 13px;
+  padding: 14px 16px;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  font-size: 15px;
   outline: none;
-  transition: border-color 0.2s;
+  transition: all 0.2s;
 }
 
 .form-group input:focus,
 .form-group select:focus {
-  border-color: #2d7a52;
+  border-color: #43a047;
+  box-shadow: 0 0 0 3px rgba(67, 160, 71, 0.15);
 }
 
 .modal-actions {
   display: flex;
-  gap: 10px;
-  margin-top: 18px;
+  gap: 14px;
+  margin-top: 28px;
 }
 
 .modal-actions button {
   flex: 1;
-  padding: 8px;
+  padding: 14px;
   border: none;
-  border-radius: 6px;
-  font-size: 13px;
+  border-radius: 12px;
+  font-size: 15px;
   cursor: pointer;
-  background: linear-gradient(135deg, #2d7a46 0%, #3d9a56 100%);
+  background: linear-gradient(135deg, #43a047 0%, #66bb6a 100%);
   color: white;
+  font-weight: 600;
 }
 
 .modal-actions button.cancel {
   background: white;
-  border: 1px solid #d0e0d0;
-  color: #666;
+  border: 2px solid #e0e0e0;
+  color: #757575;
 }
 
 .modal-actions button:hover {
@@ -356,7 +358,8 @@ body {
 }
 
 .error {
-  color: #e74c3c;
-  font-size: 12px;
-  margin-top: 6px;
+  color: #e53935;
+  font-size: 13px;
+  margin-top: 10px;
+  text-align: center;
 }
