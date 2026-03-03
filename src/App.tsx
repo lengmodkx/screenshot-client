@@ -31,7 +31,6 @@ interface Stats {
 
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
-  const [isRunning, setIsRunning] = useState(false);
   const [currentImage, setCurrentImage] = useState<string | null>(null);
   const [stats, setStats] = useState<Stats>({ todayCount: 0, lastCaptureTime: null });
   const [showSettings, setShowSettings] = useState(false);
@@ -41,8 +40,15 @@ function App() {
   const [loginError, setLoginError] = useState("");
   const [isOnline, setIsOnline] = useState(true);
   const [statusMessage, setStatusMessage] = useState("");
-  const timerRef = useRef<number | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isInitialized, setIsInitialized] = useState(false);
 
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const timerRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // 初始化：加载配置、检查网络、初始化摄像头
   useEffect(() => {
     loadConfig();
     checkNetwork();
@@ -50,32 +56,43 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // 配置加载后初始化摄像头并自动启动
   useEffect(() => {
-    if (isRunning && config) {
-      startScreenshot();
+    if (config && !isInitialized) {
+      initCamera().then(() => {
+        // 摄像头初始化完成后启动定时器
+        if (config && !cameraError) {
+          captureFrame();
+          timerRef.current = window.setInterval(() => {
+            captureFrame();
+          }, config.interval * 1000);
+        }
+      });
+      setIsInitialized(true);
+    }
+  }, [config]);
+
+  // 监听 cameraError 变化，处理摄像头出错后恢复的情况
+  useEffect(() => {
+    if (config && !cameraError && isInitialized && !timerRef.current) {
+      captureFrame();
       timerRef.current = window.setInterval(() => {
-        startScreenshot();
+        captureFrame();
       }, config.interval * 1000);
-    } else {
+    }
+
+    return () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
-    }
-    return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
     };
-  }, [isRunning, config]);
+  }, [cameraError, config, isInitialized]);
 
   const loadConfig = async () => {
     try {
       const cfg = await invoke<AppConfig>("get_config");
       setConfig(cfg);
-      if (cfg.auto_start) {
-        setIsRunning(true);
-      }
     } catch (e) {
       console.error("Failed to load config, using mock:", e);
       setConfig(MOCK_CONFIG);
@@ -92,11 +109,65 @@ function App() {
     }
   };
 
-  const startScreenshot = async () => {
-    if (!config) return;
+  // 初始化摄像头
+  const initCamera = async () => {
+    try {
+      setCameraError(null);
+      setStatusMessage("正在启动摄像头...");
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
+      });
+
+      streamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+
+      setStatusMessage("摄像头已启动");
+      console.log("Camera initialized successfully");
+    } catch (e: unknown) {
+      console.error("Camera init failed:", e);
+      const errorMessage = e instanceof Error ? e.message : String(e);
+
+      if (errorMessage.includes("Permission denied") || errorMessage.includes("NotAllowed")) {
+        setCameraError("需要摄像头权限才能截图，请允许访问");
+      } else if (errorMessage.includes("NotFoundError") || errorMessage.includes("no video device")) {
+        setCameraError("未检测到摄像头设备");
+      } else {
+        setCameraError(`摄像头启动失败: ${errorMessage}`);
+      }
+      setStatusMessage("摄像头启动失败");
+    }
+  };
+
+  // 从摄像头捕获帧
+  const captureFrame = async () => {
+    if (!config || !videoRef.current || !canvasRef.current || cameraError) return;
 
     try {
-      const imageData = await invoke<string>("capture_screen");
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+
+      // 设置 canvas 尺寸与视频一致
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth || 640;
+        canvas.height = video.videoHeight || 480;
+      }
+
+      // 绘制当前帧
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // 转为 base64
+      const imageData = canvas.toDataURL('image/png');
       setCurrentImage(imageData);
 
       const now = new Date();
@@ -106,6 +177,7 @@ function App() {
         lastCaptureTime: timeStr
       }));
 
+      // 保存或上传
       if (config.mode === "cloud" && config.token && isOnline) {
         try {
           await invoke("upload_screenshot", { imageData });
@@ -122,7 +194,7 @@ function App() {
 
       await invoke("cleanup_old_files");
     } catch (e) {
-      console.error("Screenshot failed:", e);
+      console.error("Capture failed:", e);
       setStatusMessage(`截图失败: ${e}`);
     }
   };
@@ -167,20 +239,30 @@ function App() {
       await invoke("update_config", { newConfig: config });
       setShowSettings(false);
       setStatusMessage("配置已保存");
+
+      // 重启定时器以应用新的间隔
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = window.setInterval(() => {
+          captureFrame();
+        }, config.interval * 1000);
+      }
     } catch (e) {
       console.error("Save config failed:", e);
     }
   };
 
-  const toggleRunning = async () => {
-    const newState = !isRunning;
-    setIsRunning(newState);
-    await invoke("set_running_state", { running: newState });
-  };
-
-  const manualCapture = async () => {
-    await startScreenshot();
-  };
+  // 组件卸载时清理摄像头
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+    };
+  }, []);
 
   if (!config) {
     return <div className="loading">加载中...</div>;
@@ -188,6 +270,15 @@ function App() {
 
   return (
     <div className="app">
+      {/* 隐藏的视频元素用于摄像头预览 */}
+      <video
+        ref={videoRef}
+        style={{ display: 'none' }}
+        playsInline
+        muted
+      />
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
+
       {/* 顶部状态栏 */}
       <div className="top-bar">
         <h1>截图客户端</h1>
@@ -197,21 +288,8 @@ function App() {
         </div>
       </div>
 
-      {/* 主控制按钮 - 大大居中 */}
-      <div className="main-controls">
-        <button
-          className={`btn-large ${isRunning ? 'btn-stop' : 'btn-start'}`}
-          onClick={toggleRunning}
-        >
-          {isRunning ? '■ 停止' : '▶ 开始'}
-        </button>
-        <button className="btn-large btn-capture" onClick={manualCapture}>
-          📷 截图
-        </button>
-      </div>
-
-      {/* 副按钮 */}
-      <div className="secondary-controls">
+      {/* 副按钮 - 移除开始/停止和手动截图按钮 */}
+      <div className="secondary-controls" style={{ justifyContent: 'center' }}>
         <button className="btn-small" onClick={() => setShowSettings(true)}>
           ⚙️ 设置
         </button>
@@ -227,13 +305,24 @@ function App() {
         )}
       </div>
 
+      {/* 错误提示 */}
+      {cameraError && (
+        <div className="error-banner">
+          {cameraError}
+        </div>
+      )}
+
       {/* 信息展示区 */}
       <div className="info-section">
         <div className="info-row">
           <span className="info-label">运行状态</span>
-          <span className="info-value" style={{ color: isRunning ? '#2e7d32' : '#9e9e9e' }}>
-            {isRunning ? '工作中' : '已停止'}
+          <span className="info-value" style={{ color: cameraError ? '#d32f2f' : '#2e7d32' }}>
+            {cameraError ? '异常' : '工作中'}
           </span>
+        </div>
+        <div className="info-row">
+          <span className="info-label">数据来源</span>
+          <span className="info-value">摄像头</span>
         </div>
         <div className="info-row">
           <span className="info-label">存储模式</span>
@@ -271,7 +360,9 @@ function App() {
             {currentImage ? (
               <img src={currentImage} alt="预览" />
             ) : (
-              <div className="preview-placeholder">暂无截图</div>
+              <div className="preview-placeholder">
+                {cameraError ? '摄像头异常' : '正在启动...'}
+              </div>
             )}
           </div>
           {statusMessage && <div className="status-text">{statusMessage}</div>}

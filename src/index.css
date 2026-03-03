@@ -1,1 +1,13 @@
 @import "tailwindcss";
+
+/* 错误提示横幅 */
+.error-banner {
+  background-color: #ffebee;
+  color: #c62828;
+  padding: 12px 20px;
+  margin: 10px 20px;
+  border-radius: 8px;
+  text-align: center;
+  font-weight: 500;
+  border-left: 4px solid #c62828;
+}
