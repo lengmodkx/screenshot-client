@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Commit Guidelines
+
+- 提交信息不包含 Claude 相关内容（不要添加 Co-Authored-By）
+
 ## Project Overview
 
 A Windows desktop screenshot client for school smart board devices. Takes timed screenshots and uploads to cloud or saves locally.
