@@ -219,6 +219,37 @@ body {
   font-size: 14px;
   font-weight: 600;
   color: #2e7d32;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preview-controls button {
+  padding: 4px 10px;
+  border: 1px solid #c8e6c9;
+  border-radius: 6px;
+  background: white;
+  font-size: 12px;
+  color: #2e7d32;
+  cursor: pointer;
+}
+
+.preview-controls button:hover {
+  background: #f1f8e9;
+}
+
+.preview-controls select {
+  padding: 4px 8px;
+  border: 1px solid #c8e6c9;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #2e7d32;
 }
 
 .preview-body {

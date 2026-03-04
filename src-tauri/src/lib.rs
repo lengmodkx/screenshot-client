@@ -18,6 +18,20 @@ pub struct AppConfig {
     pub username: Option<String>,
     pub auto_start: bool,
     pub retention_days: u32,
+    pub capture_mode: String,      // "camera" | "screen"
+    pub camera_resolution: String,  // "480p" | "720p" | "1080p"
+    // 新增字段
+    pub account_username: String,   // 登录账号
+    pub account_password: String,   // 登录密码
+    pub device_code: String,       // 设备编码（MAC地址）
+    pub device_name: String,       // 设备名称
+    pub school_class_id: Option<i64>,  // 班级ID
+    pub device_id: Option<i64>,     // 注册后返回的设备ID
+    pub is_registered: bool,       // 是否已注册
+    pub dept_id: Option<i64>,      // 学校/部门ID
+    pub dept_name: String,         // 学校/部门名称
+    pub access_token: Option<String>,  // 访问令牌
+    pub refresh_token: Option<String>, // 刷新令牌
 }
 
 impl Default for AppConfig {
@@ -32,11 +46,25 @@ impl Default for AppConfig {
             interval: 10,
             mode: "local".to_string(),
             local_path: default_path,
-            api_url: "http://localhost:3000".to_string(),
+            api_url: "http://192.168.1.18:48080".to_string(),
             token: None,
             username: None,
             auto_start: false,
             retention_days: 7,
+            capture_mode: "camera".to_string(),
+            camera_resolution: "1080p".to_string(),
+            // 新增默认值
+            account_username: String::new(),
+            account_password: String::new(),
+            device_code: String::new(),
+            device_name: String::new(),
+            school_class_id: None,
+            device_id: None,
+            is_registered: false,
+            dept_id: None,
+            dept_name: String::new(),
+            access_token: None,
+            refresh_token: None,
         }
     }
 }
@@ -292,6 +320,351 @@ fn cleanup_old_files(state: State<AppState>) -> Result<u32, String> {
 }
 
 #[tauri::command]
+fn detect_camera() -> Result<Vec<String>, String> {
+    // 使用 nokhwa 库枚举可用摄像头
+    // 如果没有摄像头，返回空列表
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let output = Command::new("powershell")
+            .args(["-Command", "Get-PnpDevice -Class Camera -Status OK | Select-Object -ExpandProperty FriendlyName"])
+            .output();
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let cameras: Vec<String> = stdout
+                    .lines()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                if cameras.is_empty() {
+                    Err("未检测到摄像头".to_string())
+                } else {
+                    Ok(cameras)
+                }
+            }
+            Err(_) => Err("检测摄像头失败".to_string()),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("暂不支持此平台".to_string())
+    }
+}
+
+// 获取 MAC 地址作为设备编码
+#[tauri::command]
+fn get_mac_address() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        // 获取第一个 MAC 地址
+        let output = Command::new("powershell")
+            .args(["-Command", "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -First 1 -ExpandProperty MacAddress"])
+            .output();
+
+        match output {
+            Ok(out) => {
+                let mac = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if mac.is_empty() {
+                    // 如果获取不到，返回一个随机编码
+                    Ok(format!("DEVICE_{}", uuid::Uuid::new_v4().to_string().replace("-", "")[..8].to_uppercase()))
+                } else {
+                    // 格式化 MAC 地址
+                    let mac_clean = mac.replace(":", "-").replace("-", "");
+                    Ok(format!("DEV_{}", mac_clean.to_uppercase()))
+                }
+            }
+            Err(_) => Ok(format!("DEVICE_{}", uuid::Uuid::new_v4().to_string().replace("-", "")[..8].to_uppercase())),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(format!("DEVICE_{}", uuid::Uuid::new_v4().to_string().replace("-", "")[..8].to_uppercase()))
+    }
+}
+
+// 登录响应结构
+#[derive(Debug, Serialize, Deserialize)]
+struct LoginResponse {
+    code: i32,
+    msg: String,
+    data: Option<LoginData>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LoginData {
+    user_id: i64,
+    username: String,
+    dept_id: i64,
+    dept_name: String,
+    access_token: String,
+    refresh_token: String,
+    expires_time: String,
+}
+
+// 自动登录
+#[tauri::command]
+async fn auto_login(state: State<'_, AppState>) -> Result<LoginData, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+
+    if config.account_username.is_empty() || config.account_password.is_empty() {
+        return Err("请先配置账号密码".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&format!("{}/client/inspection/login", config.api_url))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "username": config.account_username,
+            "password": config.account_password
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        let result: LoginResponse = response.json().await.map_err(|e| e.to_string())?;
+
+        if result.code == 0 {
+            if let Some(data) = result.data {
+                // 保存登录信息到配置
+                let mut config = state.config.lock().map_err(|e| e.to_string())?;
+                config.access_token = Some(data.access_token.clone());
+                config.refresh_token = Some(data.refresh_token.clone());
+                config.dept_id = Some(data.dept_id);
+                config.dept_name = data.dept_name.clone();
+                config.is_registered = false; // 重置注册状态，需要重新注册
+                save_config(&config)?;
+
+                Ok(data)
+            } else {
+                Err("登录响应数据为空".to_string())
+            }
+        } else {
+            Err(result.msg)
+        }
+    } else {
+        Err(format!("登录失败: {}", response.status()))
+    }
+}
+
+// 班级信息
+#[derive(Debug, Serialize, Deserialize)]
+struct ClassInfo {
+    id: i64,
+    class_name: String,
+}
+
+// 班级列表响应
+#[derive(Debug, Serialize, Deserialize)]
+struct ClassListResponse {
+    code: i32,
+    msg: String,
+    data: Option<Vec<ClassInfo>>,
+}
+
+// 获取班级列表
+#[tauri::command]
+async fn get_class_list(state: State<'_, AppState>) -> Result<Vec<ClassInfo>, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+
+    let token = config.access_token.ok_or("未登录")?;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&format!("{}/admin-api/hc/school-class/simple-list", config.api_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        let result: ClassListResponse = response.json().await.map_err(|e| e.to_string())?;
+
+        if result.code == 0 {
+            Ok(result.data.unwrap_or_default())
+        } else {
+            Err(result.msg)
+        }
+    } else {
+        Err(format!("获取班级列表失败: {}", response.status()))
+    }
+}
+
+// 设备注册响应
+#[derive(Debug, Serialize, Deserialize)]
+struct RegisterResponse {
+    code: i32,
+    msg: String,
+    data: Option<RegisterData>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RegisterData {
+    id: i64,
+    device_name: String,
+    device_code: String,
+    device_type: i32,
+    dept_id: i64,
+    status: i32,
+    register_type: i32,
+}
+
+// 注册设备
+#[tauri::command]
+async fn register_device(
+    device_name: String,
+    school_class_id: i64,
+    state: State<'_, AppState>,
+) -> Result<RegisterData, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+
+    let token = config.access_token.ok_or("未登录")?;
+    let device_code = if config.device_code.is_empty() {
+        // 如果没有设备编码，先生成一个
+        let mac = get_mac_address()?;
+        let mut cfg = state.config.lock().map_err(|e| e.to_string())?;
+        cfg.device_code = mac.clone();
+        save_config(&cfg)?;
+        mac
+    } else {
+        config.device_code
+    };
+
+    let dept_id = config.dept_id.ok_or("未获取到部门ID")?;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&format!("{}/client/inspection/register", config.api_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("deviceCode", device_code.as_str()),
+            ("deviceName", device_name.as_str()),
+            ("deptId", dept_id.to_string().as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        let result: RegisterResponse = response.json().await.map_err(|e| e.to_string())?;
+
+        if result.code == 0 {
+            if let Some(data) = result.data {
+                // 保存注册信息
+                let mut config = state.config.lock().map_err(|e| e.to_string())?;
+                config.device_name = data.device_name.clone();
+                config.school_class_id = Some(school_class_id);
+                config.device_id = Some(data.id);
+                config.is_registered = true;
+                save_config(&config)?;
+
+                Ok(data)
+            } else {
+                Err("注册响应数据为空".to_string())
+            }
+        } else {
+            Err(result.msg)
+        }
+    } else {
+        Err(format!("注册失败: {}", response.status()))
+    }
+}
+
+// 发送心跳
+#[tauri::command]
+async fn send_heartbeat(state: State<'_, AppState>) -> Result<bool, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+
+    let token = config.access_token.ok_or("未登录")?;
+    let device_code = config.device_code;
+
+    if device_code.is_empty() {
+        return Err("设备未注册".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&format!("{}/client/inspection/heartbeat", config.api_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .form(&[("deviceCode", device_code.as_str())])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        let result: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        if result.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 {
+            Ok(true)
+        } else {
+            Err(result.get("msg").and_then(|m| m.as_str()).unwrap_or("心跳失败").to_string())
+        }
+    } else {
+        Err(format!("心跳请求失败: {}", response.status()))
+    }
+}
+
+// 上传截图到新 API
+#[tauri::command]
+async fn upload_screenshot_v2(
+    image_data: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+
+    let token = config.access_token.ok_or("未登录")?;
+    let device_code = config.device_code;
+
+    if device_code.is_empty() {
+        return Err("设备未注册".to_string());
+    }
+
+    let base64_data = image_data
+        .strip_prefix("data:image/png;base64,")
+        .unwrap_or(&image_data);
+
+    let image_bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        base64_data,
+    ).map_err(|e| e.to_string())?;
+
+    let part = multipart::Part::bytes(image_bytes)
+        .file_name("screenshot.png")
+        .mime_str("image/png")
+        .map_err(|e| e.to_string())?;
+
+    let form = multipart::Form::new()
+        .part("file", part)
+        .text("deviceCode", device_code);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&format!("{}/client/inspection/screenshot/upload", config.api_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        let result: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        if result.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 {
+            Ok(true)
+        } else {
+            Err(result.get("msg").and_then(|m| m.as_str()).unwrap_or("上传失败").to_string())
+        }
+    } else {
+        Err(format!("上传失败: {}", response.status()))
+    }
+}
+
+#[tauri::command]
 async fn check_network(api_url: String) -> Result<bool, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -329,6 +702,13 @@ pub fn run() {
             set_running_state,
             cleanup_old_files,
             check_network,
+            detect_camera,
+            get_mac_address,
+            auto_login,
+            get_class_list,
+            register_device,
+            send_heartbeat,
+            upload_screenshot_v2,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
