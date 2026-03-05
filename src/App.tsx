@@ -167,12 +167,13 @@ function App() {
           const formattedClasses = classes.map(c => ({ id: c.id, class_name: c.className }));
           setClassList(formattedClasses);
           setDebugInfo(`加载到 ${classes.length} 个班级`);
-          setShowDeviceSetup(true);
         } catch (e) {
           console.error("获取班级列表失败:", e);
           setDebugInfo(`获取班级列表失败: ${e}`);
-          setStatusMessage(`获取班级列表失败: ${e}`);
+          // 即使获取班级列表失败，也显示设备注册页面（班级列表为空）
         }
+        // 无论如何都显示设备注册页面
+        setShowDeviceSetup(true);
       }
     } catch (e) {
       console.error("自动登录失败:", e);
@@ -558,12 +559,13 @@ function App() {
           const formattedClasses = classes.map(c => ({ id: c.id, class_name: c.className }));
           setClassList(formattedClasses);
           setDebugInfo(`加载到 ${classes.length} 个班级`);
-          setShowDeviceSetup(true);
         } catch (e) {
           console.error("获取班级列表失败:", e);
           setDebugInfo(`获取班级列表失败: ${e}`);
-          setStatusMessage(`获取班级列表失败: ${e}`);
+          // 即使获取班级列表失败，也显示设备注册页面（班级列表为空）
         }
+        // 无论如何都显示设备注册页面
+        setShowDeviceSetup(true);
       }
 
     } catch (e) {
