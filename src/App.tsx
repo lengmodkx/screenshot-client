@@ -748,16 +748,13 @@ function App() {
           <div className="form-group" style={{ marginBottom: '20px' }}>
             <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>选择班级</label>
             <select
-              value={selectedClassId?.toString() || ''}
-              onChange={(e) => {
-                const value = e.target.value;
-                setSelectedClassId(value ? parseInt(value, 10) : null);
-              }}
+              value={selectedClassId ?? ''}
+              onChange={(e) => setSelectedClassId(e.target.value ? Number(e.target.value) : null)}
               style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', background: '#fff' }}
             >
               <option value="">请选择班级</option>
               {classList.map((cls) => (
-                <option key={cls.id} value={cls.id.toString()}>{cls.class_name}</option>
+                <option key={cls.id} value={cls.id}>{cls.class_name}</option>
               ))}
             </select>
           </div>
