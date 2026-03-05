@@ -72,9 +72,8 @@ function App() {
   const [statusMessage, setStatusMessage] = useState("");
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [hasCamera, setHasCamera] = useState(true);
-  const [previewEnabled, setPreviewEnabled] = useState(true);
+  const [previewEnabled] = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [debugInfo, setDebugInfo] = useState<string>("");
   const [showDeviceSetup, setShowDeviceSetup] = useState(false);
@@ -543,37 +542,6 @@ function App() {
       setStatusMessage(`设备注册失败: ${e}`);
       setDebugInfo(`注册失败: ${e}`);
     }
-  };
-
-  // 全屏切换
-  const toggleFullscreen = () => {
-    if (!isFullscreen) {
-      if (videoRef.current?.requestFullscreen) {
-        videoRef.current.requestFullscreen();
-      }
-    } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen();
-      }
-    }
-    setIsFullscreen(!isFullscreen);
-  };
-
-  // 切换预览开启/关闭
-  const togglePreview = () => {
-    if (previewEnabled) {
-      // 停止视频流
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
-      }
-    } else {
-      // 重新启动视频流
-      if (config?.capture_mode === "camera" && hasCamera && !cameraError) {
-        initCamera();
-      }
-    }
-    setPreviewEnabled(!previewEnabled);
   };
 
   // 切换模式
