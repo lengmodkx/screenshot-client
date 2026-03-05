@@ -982,7 +982,20 @@ fn is_autostart(args: &[String]) -> bool {
 pub fn run() {
     env_logger::init();
     let config = load_config();
-    let show_window = config.show_window_on_start;
+
+    // 判断是否需要显示窗口：
+    // 1. 未登录（无账号密码）→ 显示登录页
+    // 2. 已登录但未注册 → 显示设备注册页
+    // 3. 已登录且已注册 → 最小化到托盘
+    let need_show_window = config.account_username.is_empty()
+        || config.account_password.is_empty()
+        || !config.is_registered;
+
+    println!("启动检查: username={}, password={}, is_registered={}",
+        !config.account_username.is_empty(),
+        !config.account_password.is_empty(),
+        config.is_registered);
+    println!("是否需要显示窗口: {}", need_show_window);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1073,14 +1086,17 @@ pub fn run() {
                     }
                 });
 
-                // 根据配置决定是否显示窗口
-                // 如果是开机自启，不显示窗口
-                // 如果 show_window_on_start 为 false，不显示窗口
-                if from_autostart || !show_window {
-                    let _ = window.hide();
-                } else {
+                // 根据用户登录/注册状态决定是否显示窗口：
+                // - 未登录 → 显示登录页
+                // - 已登录未注册 → 显示设备注册页
+                // - 已登录已注册 → 最小化到托盘
+                if need_show_window {
+                    println!("显示窗口（登录或注册页面）");
                     let _ = window.show();
                     let _ = window.set_focus();
+                } else {
+                    println!("已登录且已注册，最小化到托盘");
+                    let _ = window.hide();
                 }
             }
 

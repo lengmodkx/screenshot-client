@@ -17,7 +17,7 @@
         "height": 500,
         "resizable": true,
         "center": true,
-        "visible": false,
+        "visible": true,
         "skipTaskbar": false
       }
     ],
@@ -41,9 +41,5 @@
       "icons/icon.ico"
     ]
   },
-  "plugins": {
-    "autostart": {
-      "enabled": true
-    }
-  }
+  "plugins": {}
 }
