@@ -16,9 +16,16 @@
         "width": 400,
         "height": 500,
         "resizable": true,
-        "center": true
+        "center": true,
+        "visible": false,
+        "skipTaskbar": false
       }
     ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "id": "main-tray",
+      "menuOnLeftClick": false
+    },
     "security": {
       "csp": "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; script-src 'self'; style-src 'self' 'unsafe-inline'"
     }
@@ -33,5 +40,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "autostart": {
+      "enabled": true
+    }
   }
 }

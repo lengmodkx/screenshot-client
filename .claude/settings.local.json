@@ -13,7 +13,19 @@
       "Bash(start:*)",
       "Bash(powershell:*)",
       "Bash(cmd.exe:*)",
-      "Bash(gh:*)"
+      "Bash(gh:*)",
+      "Bash(netstat:*)",
+      "Bash(taskkill:*)",
+      "Bash(cd:*)",
+      "Bash(powershell.exe:*)",
+      "Bash(npm run:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git tag:*)",
+      "Bash(npx tsc:*)",
+      "Bash(git checkout:*)",
+      "Bash(rm:*)"
     ]
   }
 }

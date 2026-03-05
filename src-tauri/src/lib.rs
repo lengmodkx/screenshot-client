@@ -6,6 +6,8 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
+use tauri::Manager;
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 
 // 配置结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +35,9 @@ pub struct AppConfig {
     pub dept_name: String,         // 学校/部门名称
     pub access_token: Option<String>,  // 访问令牌
     pub refresh_token: Option<String>, // 刷新令牌
+    // 后台运行配置
+    pub autostart_enabled: bool,    // 开机自启开关
+    pub show_window_on_start: bool, // 启动时是否显示窗口
 }
 
 impl Default for AppConfig {
@@ -67,6 +72,9 @@ impl Default for AppConfig {
             dept_name: String::new(),
             access_token: None,
             refresh_token: None,
+            // 后台运行默认值
+            autostart_enabled: true,
+            show_window_on_start: false,
         }
     }
 }
@@ -966,14 +974,25 @@ async fn check_network(api_url: String) -> Result<bool, String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// 检查是否是从开机自启启动
+fn is_autostart(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--autostart")
+}
+
 pub fn run() {
     env_logger::init();
     let config = load_config();
+    let show_window = config.show_window_on_start;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState {
             config: Mutex::new(config),
             is_running: Mutex::new(false),
@@ -998,7 +1017,99 @@ pub fn run() {
             send_heartbeat,
             upload_screenshot_v2,
             upload_screenshot_file,
+            toggle_window,
+            exit_app,
         ])
+        .setup(move |app| {
+            // 获取命令行参数
+            let args: Vec<String> = std::env::args().collect();
+            let from_autostart = is_autostart(&args);
+
+            // 创建系统托盘
+            let tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("截图客户端")
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { .. } = event {
+                        let app = tray.app_handle();
+                        toggle_window_visibility(app);
+                    }
+                })
+                .build(app)?;
+
+            // 设置全局快捷键 Ctrl+Shift+S
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                app.handle().plugin(
+                    tauri_plugin_global_shortcut::Builder::new()
+                        .with_handler(|app, shortcut, _event| {
+                            if shortcut.matches(
+                                tauri_plugin_global_shortcut::Modifiers::CONTROL | tauri_plugin_global_shortcut::Modifiers::SHIFT,
+                                tauri_plugin_global_shortcut::Code::KeyS,
+                            ) {
+                                toggle_window_visibility(app);
+                            }
+                        })
+                        .build(),
+                )?;
+
+                // 注册快捷键
+                let shortcut = tauri_plugin_global_shortcut::Shortcut::new(
+                    Some(tauri_plugin_global_shortcut::Modifiers::CONTROL | tauri_plugin_global_shortcut::Modifiers::SHIFT),
+                    tauri_plugin_global_shortcut::Code::KeyS,
+                );
+                app.global_shortcut().register(shortcut)?;
+            }
+
+            // 设置窗口行为：关闭时最小化到托盘
+            if let Some(window) = app.get_webview_window("main") {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window_clone.hide();
+                    }
+                });
+
+                // 根据配置决定是否显示窗口
+                // 如果是开机自启，不显示窗口
+                // 如果 show_window_on_start 为 false，不显示窗口
+                if from_autostart || !show_window {
+                    let _ = window.hide();
+                } else {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// 切换窗口显示/隐藏
+fn toggle_window_visibility(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(true) = window.is_visible() {
+            let _ = window.hide();
+        } else {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+// 命令：切换窗口显示/隐藏
+#[tauri::command]
+fn toggle_window(app: tauri::AppHandle) {
+    toggle_window_visibility(&app);
+}
+
+// 命令：完全退出应用
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }

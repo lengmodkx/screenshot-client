@@ -11,7 +11,7 @@ const MOCK_CONFIG = {
   username: "admin",
   auto_start: false,
   retention_days: 7,
-  capture_mode: "camera",
+  capture_mode: "auto",      // "auto" | "camera" | "screen"
   camera_resolution: "1080p",
   // 新增字段
   account_username: "",
@@ -26,6 +26,9 @@ const MOCK_CONFIG = {
   dept_name: "",
   access_token: null,
   refresh_token: null,
+  // 后台运行配置
+  autostart_enabled: true,
+  show_window_on_start: false,
 };
 
 interface AppConfig {
@@ -37,7 +40,7 @@ interface AppConfig {
   username: string | null;
   auto_start: boolean;
   retention_days: number;
-  capture_mode: string;      // "camera" | "screen"
+  capture_mode: string;      // "auto" | "camera" | "screen"
   camera_resolution: string; // "480p" | "720p" | "1080p"
   // 新增字段
   account_username: string;
@@ -52,6 +55,9 @@ interface AppConfig {
   dept_name: string;
   access_token: string | null;
   refresh_token: string | null;
+  // 后台运行配置
+  autostart_enabled: boolean;
+  show_window_on_start: boolean;
 }
 
 interface Stats {
@@ -75,6 +81,7 @@ function App() {
   const [hasCamera, setHasCamera] = useState(true);
   const [previewEnabled] = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [actualCaptureMode, setActualCaptureMode] = useState<"camera" | "screen">("camera");
   const [debugInfo, setDebugInfo] = useState<string>("");
   const [showDeviceSetup, setShowDeviceSetup] = useState(false);
   const [classList, setClassList] = useState<Array<{ id: number; class_name: string }>>([]);
@@ -203,59 +210,91 @@ function App() {
   };
 
   // 检测摄像头
-  const detectCamera = async () => {
+  // 检测摄像头是否可用（包括权限检查）
+  const detectCamera = async (): Promise<boolean> => {
     try {
+      // 1. 检查是否有视频设备
       const devices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = devices.filter(d => d.kind === "videoinput");
-      setHasCamera(videoDevices.length > 0);
-    } catch {
+
+      if (videoDevices.length === 0) {
+        console.log("No video devices found");
+        setHasCamera(false);
+        return false;
+      }
+
+      // 2. 尝试获取摄像头权限
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      stream.getTracks().forEach(track => track.stop()); // 立即释放
+
+      console.log("Camera detected and accessible");
+      setHasCamera(true);
+      return true;
+    } catch (e) {
+      console.log("Camera not available:", e);
       setHasCamera(false);
+      return false;
     }
+  };
+
+  // 自动选择采集模式
+  const selectCaptureMode = async (): Promise<"camera" | "screen"> => {
+    if (!config) return "screen";
+
+    // 如果配置强制指定了模式
+    if (config.capture_mode === "camera") {
+      const hasCam = await detectCamera();
+      if (hasCam) return "camera";
+      console.warn("Camera mode requested but camera not available, falling back to screen");
+      return "screen";
+    }
+
+    if (config.capture_mode === "screen") {
+      return "screen";
+    }
+
+    // auto 模式：优先摄像头
+    const hasCam = await detectCamera();
+    return hasCam ? "camera" : "screen";
   };
 
   // 配置加载后初始化（登录后才启动截图）
   useEffect(() => {
     if (config && !isInitialized && isLoggedIn) {
-      const captureMode = config.capture_mode || "camera";
+      // 自动选择采集模式
+      selectCaptureMode().then((mode) => {
+        setActualCaptureMode(mode);
+        setStatusMessage(`使用${mode === "camera" ? "摄像头" : "屏幕截图"}模式`);
 
-      // 如果有摄像头且模式为摄像头模式，初始化摄像头
-      if (captureMode === "camera" && hasCamera) {
-        initCamera().then(() => {
-          if (!cameraError) {
-            captureAndPushFrame();
-            // 视频推送：每500ms（2帧/秒）
-            timerRef.current = window.setInterval(() => {
-              captureAndPushFrame();
-            }, 500);
-          }
-        });
-      } else {
-        // 无摄像头或模式为截图模式，直接开始截图
-        captureAndPushFrame();
-        // 视频推送：每500ms（2帧/秒）
-        timerRef.current = window.setInterval(() => {
-          captureAndPushFrame();
-        }, 500);
-      }
-
-      // 截图上传：每5分钟上传一次（用于后台查看静态画面）
-      uploadScreenshotFile();
-      screenshotTimerRef.current = window.setInterval(() => {
-        uploadScreenshotFile();
-      }, 5 * 60 * 1000);
+        // 如果是摄像头模式，先初始化摄像头
+        if (mode === "camera") {
+          initCamera().then(() => {
+            if (!cameraError) {
+              startCaptureLoop();
+            } else {
+              // 摄像头初始化失败，降级到屏幕截图
+              console.warn("Camera init failed, falling back to screen");
+              setActualCaptureMode("screen");
+              startCaptureLoop();
+            }
+          });
+        } else {
+          // 屏幕截图模式直接开始
+          startCaptureLoop();
+        }
+      });
 
       setIsInitialized(true);
     }
-  }, [config, hasCamera, isLoggedIn]);
+  }, [config, isLoggedIn]);
 
   // 监听 cameraError 变化，处理摄像头出错后恢复的情况（登录后才启动）
   useEffect(() => {
     if (config && !cameraError && isInitialized && !timerRef.current && isLoggedIn) {
-      captureAndPushFrame();
-      // 视频推送：每500ms（2帧/秒）
-      timerRef.current = window.setInterval(() => {
-        captureAndPushFrame();
-      }, 500);
+      // 如果之前是摄像头模式且出错，现在恢复正常，重新开始采集
+      if (actualCaptureMode === "camera") {
+        startCaptureLoop();
+      }
     }
 
     return () => {
@@ -268,7 +307,7 @@ function App() {
         screenshotTimerRef.current = null;
       }
     };
-  }, [cameraError, config, isInitialized, isLoggedIn]);
+  }, [cameraError, config, isInitialized, isLoggedIn, actualCaptureMode]);
 
   const loadConfig = async () => {
     try {
@@ -336,11 +375,29 @@ function App() {
     }
   };
 
+  // 启动采集循环
+  const startCaptureLoop = () => {
+    // 立即执行一次
+    captureAndPushFrame();
+
+    // 视频推送：每500ms（2帧/秒）
+    timerRef.current = window.setInterval(() => {
+      captureAndPushFrame();
+    }, 500);
+
+    // 截图上传：每5分钟上传一次（用于后台查看静态画面）
+    uploadScreenshotFile();
+    screenshotTimerRef.current = window.setInterval(() => {
+      uploadScreenshotFile();
+    }, 5 * 60 * 1000);
+  };
+
   // 捕获帧并推送到视频流（每500ms调用一次，2帧/秒）
   const captureAndPushFrame = async () => {
     if (!config) return;
 
-    const captureMode = config.capture_mode || "camera";
+    // 使用实际选择的采集模式
+    const captureMode = actualCaptureMode;
 
     // 摄像头模式
     if (captureMode === "camera" && hasCamera && !cameraError && videoRef.current && canvasRef.current) {
