@@ -6,7 +6,7 @@ const MOCK_CONFIG = {
   interval: 10,
   mode: "cloud",
   local_path: "C:/Screenshots",
-  api_url: "http://192.168.1.18:48080",
+  api_url: "http://172.16.10.11:48080",
   token: "mock-token-123",
   username: "admin",
   auto_start: false,
@@ -16,6 +16,7 @@ const MOCK_CONFIG = {
   // 新增字段
   account_username: "",
   account_password: "",
+  tenant_name: "",
   device_code: "",
   device_name: "",
   school_class_id: null,
@@ -41,6 +42,7 @@ interface AppConfig {
   // 新增字段
   account_username: string;
   account_password: string;
+  tenant_name: string;
   device_code: string;
   device_name: string;
   school_class_id: number | null;
@@ -74,20 +76,20 @@ function App() {
   const [hasCamera, setHasCamera] = useState(true);
   const [previewEnabled, setPreviewEnabled] = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-
-  // 检查 sessionStorage 登录状态
-  useEffect(() => {
-    const loggedIn = sessionStorage.getItem('isLoggedIn') === 'true';
-    if (loggedIn) {
-      setIsLoggedIn(true);
-    }
-  }, []);
+  const [debugInfo, setDebugInfo] = useState<string>("");
+  const [showDeviceSetup, setShowDeviceSetup] = useState(false);
+  const [classList, setClassList] = useState<Array<{ id: number; class_name: string }>>([]);
+  const [selectedClassId, setSelectedClassId] = useState<number | null>(null);
+  const [selectedDeviceType, setSelectedDeviceType] = useState<number>(1);
+  const [customDeviceName, setCustomDeviceName] = useState<string>("");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const timerRef = useRef<number | null>(null);
   const heartbeatTimerRef = useRef<number | null>(null);
+  const screenshotTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const currentImageRef = useRef<string | null>(null);
 
   // 分辨率映射
   const resolutionMap: Record<string, { width: number; height: number }> = {
@@ -107,16 +109,71 @@ function App() {
 
   // 自动登录和注册检查
   useEffect(() => {
-    if (config && isInitialized) {
+    if (config && isInitialized && !isLoggedIn) {
       // 检查是否有账号密码
       if (!config.account_username || !config.account_password) {
-        // 账号密码为空，显示设置弹窗让用户配置
-        setShowSettings(true);
+        // 账号密码为空，保持在登录页面让用户输入
         return;
       }
 
+      // 有账号密码，自动登录
+      autoLoginAndRegister();
     }
   }, [config, isInitialized]);
+
+  // 自动登录并处理注册
+  const autoLoginAndRegister = async () => {
+    if (!config?.account_username || !config?.account_password) return;
+
+    try {
+      setStatusMessage("正在自动登录...");
+
+      // 调用后端登录接口
+      const loginResult = await invoke<{
+        user_id: number;
+        username: string;
+        dept_id: number;
+        dept_name: string;
+        access_token: string;
+        refresh_token: string;
+        expires_time: string;
+      }>("auto_login");
+
+      console.log("自动登录成功:", loginResult);
+
+      // 更新登录状态
+      setIsLoggedIn(true);
+
+      // 重新加载配置，获取最新的是否已注册状态
+      const newConfig = await invoke<AppConfig>("get_config");
+      setConfig(newConfig);
+
+      // 检查是否已注册设备（使用新加载的配置）
+      if (newConfig.is_registered) {
+        // 已注册，直接进入摄像头页面
+        setStatusMessage("自动登录成功");
+      } else {
+        // 未注册，显示设备设置页面
+        setStatusMessage("请先设置班级和设备信息");
+        try {
+          const classes = await invoke<Array<{ id: number; className: string }>>("get_class_list");
+          console.log("班级列表:", classes);
+          const formattedClasses = classes.map(c => ({ id: c.id, class_name: c.className }));
+          setClassList(formattedClasses);
+          setDebugInfo(`加载到 ${classes.length} 个班级`);
+          setShowDeviceSetup(true);
+        } catch (e) {
+          console.error("获取班级列表失败:", e);
+          setDebugInfo(`获取班级列表失败: ${e}`);
+          setStatusMessage(`获取班级列表失败: ${e}`);
+        }
+      }
+    } catch (e) {
+      console.error("自动登录失败:", e);
+      setStatusMessage(`自动登录失败: ${e}`);
+      // 自动登录失败，保持在登录页面
+    }
+  };
 
   // 启动心跳定时器
   useEffect(() => {
@@ -157,39 +214,49 @@ function App() {
     }
   };
 
-  // 配置加载后初始化并自动启动
+  // 配置加载后初始化（登录后才启动截图）
   useEffect(() => {
-    if (config && !isInitialized) {
+    if (config && !isInitialized && isLoggedIn) {
       const captureMode = config.capture_mode || "camera";
 
       // 如果有摄像头且模式为摄像头模式，初始化摄像头
       if (captureMode === "camera" && hasCamera) {
         initCamera().then(() => {
           if (!cameraError) {
-            captureFrame();
+            captureAndPushFrame();
+            // 视频推送：每500ms（2帧/秒）
             timerRef.current = window.setInterval(() => {
-              captureFrame();
-            }, config.interval * 1000);
+              captureAndPushFrame();
+            }, 500);
           }
         });
       } else {
         // 无摄像头或模式为截图模式，直接开始截图
-        captureFrame();
+        captureAndPushFrame();
+        // 视频推送：每500ms（2帧/秒）
         timerRef.current = window.setInterval(() => {
-          captureFrame();
-        }, config.interval * 1000);
+          captureAndPushFrame();
+        }, 500);
       }
+
+      // 截图上传：每5分钟上传一次（用于后台查看静态画面）
+      uploadScreenshotFile();
+      screenshotTimerRef.current = window.setInterval(() => {
+        uploadScreenshotFile();
+      }, 5 * 60 * 1000);
+
       setIsInitialized(true);
     }
-  }, [config, hasCamera]);
+  }, [config, hasCamera, isLoggedIn]);
 
-  // 监听 cameraError 变化，处理摄像头出错后恢复的情况
+  // 监听 cameraError 变化，处理摄像头出错后恢复的情况（登录后才启动）
   useEffect(() => {
-    if (config && !cameraError && isInitialized && !timerRef.current) {
-      captureFrame();
+    if (config && !cameraError && isInitialized && !timerRef.current && isLoggedIn) {
+      captureAndPushFrame();
+      // 视频推送：每500ms（2帧/秒）
       timerRef.current = window.setInterval(() => {
-        captureFrame();
-      }, config.interval * 1000);
+        captureAndPushFrame();
+      }, 500);
     }
 
     return () => {
@@ -197,8 +264,12 @@ function App() {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
+      if (screenshotTimerRef.current) {
+        clearInterval(screenshotTimerRef.current);
+        screenshotTimerRef.current = null;
+      }
     };
-  }, [cameraError, config, isInitialized]);
+  }, [cameraError, config, isInitialized, isLoggedIn]);
 
   const loadConfig = async () => {
     try {
@@ -266,8 +337,8 @@ function App() {
     }
   };
 
-  // 从摄像头捕获帧
-  const captureFrame = async () => {
+  // 捕获帧并推送到视频流（每500ms调用一次，2帧/秒）
+  const captureAndPushFrame = async () => {
     if (!config) return;
 
     const captureMode = config.capture_mode || "camera";
@@ -293,6 +364,7 @@ function App() {
         // 转为 base64
         const imageData = canvas.toDataURL('image/png');
         setCurrentImage(imageData);
+        currentImageRef.current = imageData; // 保存到 ref 供截图上传使用
 
         const now = new Date();
         const timeStr = now.toLocaleTimeString();
@@ -301,30 +373,21 @@ function App() {
           lastCaptureTime: timeStr
         }));
 
-        // 保存或上传（已登录且已注册时上传到服务器）
+        // 推送到视频流（不等待响应，避免阻塞）
         if (isLoggedIn && config.is_registered && isOnline) {
-          try {
-            await invoke("upload_screenshot_v2", { imageData });
-            setStatusMessage(`已上传 - ${timeStr}`);
-          } catch (e) {
-            console.error("Upload failed:", e);
-            setStatusMessage(`上传失败 - ${timeStr}`);
-          }
-        } else if (config.mode === "local") {
-          await saveLocally(imageData);
-          setStatusMessage(`已保存本地 - ${timeStr}`);
+          invoke("upload_screenshot_v2", { imageData }).catch(e => {
+            console.error("Video push failed:", e);
+          });
         }
-
-        await invoke("cleanup_old_files");
       } catch (e) {
         console.error("Capture failed:", e);
-        setStatusMessage(`截图失败: ${e}`);
       }
     } else {
       // 截图模式（调用后端截屏）
       try {
         const imageData = await invoke<string>("capture_screen");
         setCurrentImage(imageData);
+        currentImageRef.current = imageData; // 保存到 ref 供截图上传使用
 
         const now = new Date();
         const timeStr = now.toLocaleTimeString();
@@ -333,34 +396,40 @@ function App() {
           lastCaptureTime: timeStr
         }));
 
-        // 保存或上传（已登录且已注册时上传到服务器）
+        // 推送到视频流（不等待响应，避免阻塞）
         if (isLoggedIn && config.is_registered && isOnline) {
-          try {
-            await invoke("upload_screenshot_v2", { imageData });
-            setStatusMessage(`已上传 - ${timeStr}`);
-          } catch (e) {
-            console.error("Upload failed:", e);
-            setStatusMessage(`上传失败 - ${timeStr}`);
-          }
-        } else if (config.mode === "local") {
-          await saveLocally(imageData);
-          setStatusMessage(`已保存本地 - ${timeStr}`);
+          invoke("upload_screenshot_v2", { imageData }).catch(e => {
+            console.error("Video push failed:", e);
+          });
         }
-
-        await invoke("cleanup_old_files");
       } catch (e) {
         console.error("Screen capture failed:", e);
-        setStatusMessage(`截屏失败: ${e}`);
       }
     }
   };
 
-  const saveLocally = async (imageData: string) => {
-    try {
-      await invoke("save_screenshot_to_local", { imageData });
-    } catch (e) {
-      console.error("Save locally failed:", e);
+  // 上传截图文件（每5分钟调用一次）
+  const uploadScreenshotFile = async () => {
+    if (!config || !isLoggedIn || !config.is_registered || !isOnline) return;
+
+    const imageData = currentImageRef.current;
+    if (!imageData) {
+      console.log("No image available for screenshot upload");
+      return;
     }
+
+    try {
+      const url = await invoke<string>("upload_screenshot_file", { imageData });
+      console.log("Screenshot uploaded:", url);
+      setStatusMessage(`截图已上传: ${new Date().toLocaleTimeString()}`);
+    } catch (e) {
+      console.error("Screenshot upload failed:", e);
+    }
+  };
+
+  // 手动触发截图（保留原有功能供用户手动使用）
+  const captureFrame = async () => {
+    await captureAndPushFrame();
   };
 
   const handleLogin = async () => {
@@ -399,7 +468,7 @@ function App() {
       setStatusMessage("正在登录...");
 
       // 直接调用后端登录接口，使用当前输入的值
-      await invoke<{
+      const loginResult = await invoke<{
         user_id: number;
         username: string;
         dept_id: number;
@@ -409,19 +478,70 @@ function App() {
         expires_time: string;
       }>("auto_login");
 
-      // 更新登录状态
+      console.log("登录成功:", loginResult);
+
+      // 更新登录状态（触发页面切换）
       setIsLoggedIn(true);
       setStatusMessage("登录成功");
 
-      // 保存登录状态到 sessionStorage
-      sessionStorage.setItem('isLoggedIn', 'true');
+      // 重新加载配置以获取最新的用户信息
+      await loadConfig();
 
-      // 重新加载页面
-      window.location.reload();
+      // 检查是否已注册设备（使用 updatedConfig，因为 config 状态还未更新）
+      if (updatedConfig.is_registered) {
+        // 已注册，直接进入摄像头页面
+        setStatusMessage("登录成功");
+      } else {
+        // 未注册，显示设备设置页面
+        setStatusMessage("请先设置班级和设备信息");
+        try {
+          setDebugInfo("正在加载班级列表...");
+          const classes = await invoke<Array<{ id: number; className: string }>>("get_class_list");
+          console.log("班级列表:", classes);
+          // 将 className 映射为 class_name 以兼容前端显示
+          const formattedClasses = classes.map(c => ({ id: c.id, class_name: c.className }));
+          setClassList(formattedClasses);
+          setDebugInfo(`加载到 ${classes.length} 个班级`);
+          setShowDeviceSetup(true);
+        } catch (e) {
+          console.error("获取班级列表失败:", e);
+          setDebugInfo(`获取班级列表失败: ${e}`);
+          setStatusMessage(`获取班级列表失败: ${e}`);
+        }
+      }
 
     } catch (e) {
       console.error("登录失败:", e);
       setStatusMessage(`登录失败: ${e}`);
+    }
+  };
+
+  // 处理设备注册
+  const handleDeviceRegister = async () => {
+    if (!selectedClassId) {
+      setStatusMessage("请选择班级");
+      return;
+    }
+
+    const deviceName = selectedDeviceType === 3
+      ? (customDeviceName || "其他设备")
+      : (selectedDeviceType === 1 ? "智能黑板" : "智能多媒体设备");
+
+    try {
+      setStatusMessage("正在注册设备...");
+      await invoke("register_device", {
+        deviceName: deviceName,
+        schoolClassId: selectedClassId,
+        deviceType: selectedDeviceType
+      });
+      setStatusMessage("设备注册成功");
+      setShowDeviceSetup(false);
+      // 重新加载配置
+      await loadConfig();
+    } catch (e) {
+      console.error("设备注册失败:", e);
+      setStatusMessage(`设备注册失败: ${e}`);
+      setDebugInfo(`注册失败: ${e}`);
     }
   };
 
@@ -510,150 +630,301 @@ function App() {
   // 未登录时显示登录界面
   if (!isLoggedIn) {
     return (
-      <div className="app" style={{ justifyContent: 'center', alignItems: 'center' }}>
-        <div className="login-container" style={{ width: '100%', maxWidth: '360px', padding: '40px', background: 'white', borderRadius: '20px', boxShadow: '0 4px 20px rgba(0,0,0,0.1)' }}>
-          <h2 style={{ textAlign: 'center', marginBottom: '30px', color: '#2e7d32', fontSize: '24px' }}>智能黑板客户端</h2>
-          <div className="form-group">
-            <label>API地址</label>
+      <div className="app" style={{ justifyContent: 'center', alignItems: 'center', background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)' }}>
+        <div className="login-container" style={{ width: '100%', maxWidth: '400px', padding: '48px', background: 'rgba(255,255,255,0.95)', borderRadius: '24px', boxShadow: '0 8px 32px rgba(0,0,0,0.3)' }}>
+          <div style={{ textAlign: 'center', marginBottom: '36px' }}>
+            <div style={{ width: '64px', height: '64px', margin: '0 auto 16px', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', borderRadius: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '32px' }}>
+              📷
+            </div>
+            <h2 style={{ color: '#1a1a2e', fontSize: '26px', fontWeight: '700', margin: 0 }}>智能黑板客户端</h2>
+            <p style={{ color: '#666', marginTop: '8px', fontSize: '14px' }}>智慧校园 screenshot 管理系统</p>
+          </div>
+          <div className="form-group" style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>API地址</label>
             <input
               type="text"
               value={config.api_url}
               onChange={(e) => setConfig({ ...config, api_url: e.target.value })}
               placeholder="请输入API地址"
+              style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', transition: 'all 0.3s', boxSizing: 'border-box' }}
             />
           </div>
-          <div className="form-group">
-            <label>账号</label>
+          <div className="form-group" style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>租户名称</label>
+            <input
+              type="text"
+              value={config.tenant_name}
+              onChange={(e) => setConfig({ ...config, tenant_name: e.target.value })}
+              placeholder="请输入租户名称"
+              style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', transition: 'all 0.3s', boxSizing: 'border-box' }}
+            />
+          </div>
+          <div className="form-group" style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>账号</label>
             <input
               type="text"
               value={config.account_username}
               onChange={(e) => setConfig({ ...config, account_username: e.target.value })}
               placeholder="请输入账号"
+              style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', transition: 'all 0.3s', boxSizing: 'border-box' }}
             />
           </div>
-          <div className="form-group">
-            <label>密码</label>
+          <div className="form-group" style={{ marginBottom: '24px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>密码</label>
             <input
               type="password"
               value={config.account_password}
               onChange={(e) => setConfig({ ...config, account_password: e.target.value })}
               placeholder="请输入密码"
               onKeyPress={(e) => e.key === 'Enter' && handleSaveConfig()}
+              style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', transition: 'all 0.3s', boxSizing: 'border-box' }}
             />
           </div>
-          {statusMessage && <p className="error" style={{ textAlign: 'center', marginBottom: '20px' }}>{statusMessage}</p>}
+          {statusMessage && (
+            <p style={{ textAlign: 'center', marginBottom: '20px', padding: '12px', background: statusMessage.includes('成功') ? '#e8f5e9' : '#ffebee', color: statusMessage.includes('成功') ? '#2e7d32' : '#c62828', borderRadius: '8px', fontSize: '14px' }}>
+              {statusMessage}
+            </p>
+          )}
           <button
             onClick={handleSaveConfig}
-            style={{ width: '100%', padding: '16px', background: 'linear-gradient(135deg, #43a047 0%, #66bb6a 100%)', color: 'white', border: 'none', borderRadius: '12px', fontSize: '16px', fontWeight: '600', cursor: 'pointer' }}
+            style={{ width: '100%', padding: '16px', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', color: 'white', border: 'none', borderRadius: '12px', fontSize: '16px', fontWeight: '600', cursor: 'pointer', transition: 'all 0.3s', boxShadow: '0 4px 15px rgba(102, 126, 234, 0.4)' }}
+            onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
+            onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
           >
-            登录
+            登 录
           </button>
+          {debugInfo && (
+            <div style={{ marginTop: '16px', padding: '12px', background: '#f5f5f5', borderRadius: '8px', fontSize: '12px', color: '#666', wordBreak: 'break-all', maxHeight: '200px', overflow: 'auto' }}>
+              <strong>调试信息:</strong><br/>
+              {debugInfo}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // 设备设置页面（首次登录后显示）
+  if (showDeviceSetup) {
+    return (
+      <div className="app" style={{ justifyContent: 'center', alignItems: 'center', background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)' }}>
+        <div style={{ width: '100%', maxWidth: '400px', padding: '48px', background: 'rgba(255,255,255,0.95)', borderRadius: '24px', boxShadow: '0 8px 32px rgba(0,0,0,0.3)' }}>
+          <div style={{ textAlign: 'center', marginBottom: '36px' }}>
+            <div style={{ width: '64px', height: '64px', margin: '0 auto 16px', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', borderRadius: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '32px' }}>
+              ⚙️
+            </div>
+            <h2 style={{ color: '#1a1a2e', fontSize: '26px', fontWeight: '700', margin: 0 }}>设备设置</h2>
+            <p style={{ color: '#666', marginTop: '8px', fontSize: '14px' }}>请选择班级和设备类型</p>
+          </div>
+
+          {/* 班级选择 */}
+          <div className="form-group" style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>选择班级</label>
+            <select
+              value={selectedClassId || ''}
+              onChange={(e) => setSelectedClassId(Number(e.target.value))}
+              style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', background: '#fff' }}
+            >
+              <option value="">请选择班级</option>
+              {classList.map((cls) => (
+                <option key={cls.id} value={cls.id}>{cls.class_name}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* 设备类型选择 */}
+          <div className="form-group" style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>设备类型</label>
+            <select
+              value={selectedDeviceType}
+              onChange={(e) => setSelectedDeviceType(Number(e.target.value))}
+              style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', background: '#fff' }}
+            >
+              <option value={1}>智能黑板</option>
+              <option value={2}>智能多媒体设备</option>
+              <option value={3}>其他</option>
+            </select>
+          </div>
+
+          {/* 自定义设备名称（选择"其他"时显示） */}
+          {selectedDeviceType === 3 && (
+            <div className="form-group" style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>设备名称</label>
+              <input
+                type="text"
+                value={customDeviceName}
+                onChange={(e) => setCustomDeviceName(e.target.value)}
+                placeholder="请输入设备名称"
+                style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', boxSizing: 'border-box' }}
+              />
+            </div>
+          )}
+
+          {statusMessage && (
+            <p style={{ textAlign: 'center', marginBottom: '20px', padding: '12px', background: statusMessage.includes('成功') ? '#e8f5e9' : '#ffebee', color: statusMessage.includes('成功') ? '#2e7d32' : '#c62828', borderRadius: '8px', fontSize: '14px' }}>
+              {statusMessage}
+            </p>
+          )}
+
+          <button
+            onClick={handleDeviceRegister}
+            style={{ width: '100%', padding: '16px', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', color: 'white', border: 'none', borderRadius: '12px', fontSize: '16px', fontWeight: '600', cursor: 'pointer', transition: 'all 0.3s', boxShadow: '0 4px 15px rgba(102, 126, 234, 0.4)' }}
+            onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
+            onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+          >
+            完成设置
+          </button>
+
+          {debugInfo && (
+            <div style={{ marginTop: '16px', padding: '12px', background: '#f5f5f5', borderRadius: '8px', fontSize: '12px', color: '#666', wordBreak: 'break-all' }}>
+              <strong>调试信息:</strong><br/>
+              {debugInfo}
+            </div>
+          )}
         </div>
       </div>
     );
   }
 
   return (
-    <div className="app">
+    <div className="app" style={{ padding: 0, background: '#0a0a0f', height: '100vh', display: 'flex', flexDirection: 'column' }}>
       {/* 隐藏的 canvas 用于捕获帧 */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-      {/* 顶部状态栏 */}
-      <div className="top-bar">
-        <h1>截图客户端</h1>
-        <div className="status-badge">
-          <span className={`status-dot ${isOnline ? 'online' : 'offline'}`}></span>
-          <span>{isOnline ? '在线' : '离线'}</span>
+      {/* 顶部状态栏 - 简洁信息条 */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '12px 24px',
+        background: 'linear-gradient(90deg, #1a1a2e 0%, #16213e 100%)',
+        borderBottom: '1px solid rgba(255,255,255,0.1)',
+        color: 'white',
+        flexShrink: 0
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '20px' }}>📷</span>
+            <span style={{ fontWeight: 600, fontSize: '16px' }}>智能黑板</span>
+          </div>
+          {config.account_username && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#a0a0b0', fontSize: '14px' }}>
+              <span>👤</span>
+              <span>{config.account_username}</span>
+            </div>
+          )}
+          {config.dept_name && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#a0a0b0', fontSize: '14px' }}>
+              <span>🏫</span>
+              <span>{config.dept_name}</span>
+            </div>
+          )}
         </div>
-      </div>
-
-      {/* 副按钮 - 移除开始/停止和手动截图按钮 */}
-      <div className="secondary-controls" style={{ justifyContent: 'center' }}>
-        {isLoggedIn && (
-          <>
-            <button
-              className="btn-small"
-              onClick={() => switchCaptureMode(config.capture_mode === "camera" ? "screen" : "camera")}
-            >
-              {config.capture_mode === "camera" ? "📷 切换截图" : "🎥 切换摄像头"}
-            </button>
-            <button className="btn-small" onClick={() => setShowSettings(true)}>
-              ⚙️ 设置
-            </button>
-          </>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{
+            width: '8px',
+            height: '8px',
+            borderRadius: '50%',
+            background: isOnline ? '#4ade80' : '#ef4444',
+            boxShadow: isOnline ? '0 0 8px #4ade80' : '0 0 8px #ef4444'
+          }} />
+          <span style={{ fontSize: '14px', color: isOnline ? '#4ade80' : '#ef4444' }}>
+            {isOnline ? '在线' : '离线'}
+          </span>
+        </div>
       </div>
 
       {/* 错误提示 */}
       {cameraError && (
-        <div className="error-banner">
+        <div style={{
+          padding: '12px 24px',
+          background: '#7f1d1d',
+          color: '#fecaca',
+          textAlign: 'center',
+          fontSize: '14px',
+          flexShrink: 0
+        }}>
           {cameraError}
         </div>
       )}
 
-      {/* 信息展示区 */}
-      <div className="info-section">
-        <div className="info-row">
-          <span className="info-label">运行状态</span>
-          <span className="info-value" style={{ color: cameraError ? '#d32f2f' : '#2e7d32' }}>
-            {cameraError ? '异常' : (config.is_registered ? '工作中' : '未注册')}
-          </span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">登录状态</span>
-          <span className="info-value" style={{ color: isLoggedIn ? '#2e7d32' : '#d32f2f' }}>
-            {isLoggedIn ? '已登录' : '未登录'}
-          </span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">在线状态</span>
-          <span className="info-value" style={{ color: isOnline ? '#2e7d32' : '#d32f2f' }}>
-            {isOnline ? '在线' : '离线'}
-          </span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">数据来源</span>
-          <span className="info-value">
-            {config.capture_mode === "camera" ? "摄像头" : "屏幕截图"}
-            {!hasCamera && <span style={{ fontSize: '12px', color: '#f57c00' }}> (无摄像头)</span>}
-          </span>
-        </div>
-        {config.dept_name && (
-          <div className="info-row">
-            <span className="info-label">学校</span>
-            <span className="info-value">{config.dept_name}</span>
-          </div>
-        )}
-        {config.device_name && (
-          <div className="info-row">
-            <span className="info-label">设备名称</span>
-            <span className="info-value">{config.device_name}</span>
-          </div>
-        )}
-        <div className="info-row">
-          <span className="info-label">截图间隔</span>
-          <span className="info-value">{config.interval} 秒</span>
-        </div>
-      </div>
+      {/* 主内容区 - 摄像头预览 */}
+      <div style={{
+        flex: 1,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '16px',
+        overflow: 'hidden',
+        position: 'relative'
+      }}>
+        <div style={{
+          width: '100%',
+          height: '100%',
+          borderRadius: '12px',
+          overflow: 'hidden',
+          background: '#000',
+          boxShadow: '0 4px 24px rgba(0,0,0,0.5)',
+          position: 'relative'
+        }}>
+          {/* 摄像头预览 - 全屏大画面 */}
+          {config.capture_mode === "camera" && hasCamera && previewEnabled && !cameraError && (
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
+            />
+          )}
+          {/* 屏幕截图显示 */}
+          {config.capture_mode === "screen" && currentImage && (
+            <img src={currentImage} alt="预览" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+          )}
+          {/* 无画面时 */}
+          {(!previewEnabled || cameraError || !currentImage) && (
+            <div style={{
+              width: '100%',
+              height: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexDirection: 'column',
+              gap: '16px',
+              color: '#666'
+            }}>
+              <span style={{ fontSize: '64px', opacity: 0.5 }}>{cameraError ? '⚠️' : '📷'}</span>
+              <span style={{ fontSize: '18px' }}>{cameraError ? '摄像头异常' : '正在启动...'}</span>
+            </div>
+          )}
 
-      {/* 统计区 */}
-      <div className="stats-section">
-        <div className="stat-card">
-          <div className="stat-number">{stats.todayCount}</div>
-          <div className="stat-label">今日截图</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-number">{stats.lastCaptureTime || '--:--:--'}</div>
-          <div className="stat-label">最后截图</div>
-        </div>
-      </div>
+          {/* 状态浮层 - 右上角 */}
+          {statusMessage && (
+            <div style={{
+              position: 'absolute',
+              top: '16px',
+              right: '16px',
+              padding: '8px 16px',
+              background: 'rgba(0,0,0,0.7)',
+              backdropFilter: 'blur(8px)',
+              borderRadius: '8px',
+              color: '#fff',
+              fontSize: '13px',
+              border: '1px solid rgba(255,255,255,0.1)'
+            }}>
+              {statusMessage}
+            </div>
+          )}
 
-      {/* 预览区 */}
-      <div className="preview-section">
-        <div className="preview-header">
-          <span>🖼️ 最新截图</span>
+          {/* 分辨率选择器 - 左上角 */}
           {config.capture_mode === "camera" && hasCamera && (
-            <div className="preview-controls">
+            <div style={{
+              position: 'absolute',
+              top: '16px',
+              left: '16px',
+              display: 'flex',
+              gap: '8px'
+            }}>
               <select
                 value={config.camera_resolution}
                 onChange={async (e) => {
@@ -664,47 +935,114 @@ function App() {
                   });
                   initCamera();
                 }}
-                style={{ marginRight: '8px', padding: '4px' }}
+                style={{
+                  padding: '8px 12px',
+                  background: 'rgba(0,0,0,0.6)',
+                  backdropFilter: 'blur(8px)',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                  borderRadius: '8px',
+                  color: '#fff',
+                  fontSize: '13px',
+                  cursor: 'pointer'
+                }}
               >
-                <option value="480p">480p</option>
-                <option value="720p">720p</option>
-                <option value="1080p">1080p</option>
+                <option value="480p" style={{ background: '#1a1a2e' }}>480p</option>
+                <option value="720p" style={{ background: '#1a1a2e' }}>720p</option>
+                <option value="1080p" style={{ background: '#1a1a2e' }}>1080p</option>
               </select>
-              <button
-                onClick={togglePreview}
-                style={{ marginRight: '8px', padding: '4px 8px' }}
-              >
-                {previewEnabled ? '暂停预览' : '开启预览'}
-              </button>
-              <button onClick={toggleFullscreen} style={{ padding: '4px 8px' }}>
-                {isFullscreen ? '退出全屏' : '全屏'}
-              </button>
             </div>
           )}
         </div>
-        <div className="preview-body">
-          <div className="preview-image">
-            {/* 摄像头预览 */}
-            {config.capture_mode === "camera" && hasCamera && previewEnabled && !cameraError && (
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
-              />
-            )}
-            {/* 截图显示 */}
-            {currentImage && (
-              <img src={currentImage} alt="预览" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-            )}
-            {!currentImage && (
-              <div className="preview-placeholder">
-                {cameraError ? '摄像头异常' : '正在启动...'}
-              </div>
-            )}
+      </div>
+
+      {/* 底部信息栏 */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '16px 24px',
+        background: 'linear-gradient(90deg, #1a1a2e 0%, #16213e 100%)',
+        borderTop: '1px solid rgba(255,255,255,0.1)',
+        color: 'white',
+        flexShrink: 0
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '32px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <span style={{ fontSize: '11px', color: '#888' }}>设备</span>
+            <span style={{ fontSize: '14px', fontWeight: 500 }}>{config.device_name || '未命名设备'}</span>
           </div>
-          {statusMessage && <div className="status-text">{statusMessage}</div>}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <span style={{ fontSize: '11px', color: '#888' }}>截图间隔</span>
+            <span style={{ fontSize: '14px', fontWeight: 500 }}>{config.interval} 秒</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <span style={{ fontSize: '11px', color: '#888' }}>今日截图</span>
+            <span style={{ fontSize: '14px', fontWeight: 500, color: '#4ade80' }}>{stats.todayCount} 张</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <span style={{ fontSize: '11px', color: '#888' }}>最后截图</span>
+            <span style={{ fontSize: '14px', fontWeight: 500 }}>{stats.lastCaptureTime || '--:--:--'}</span>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <button
+            onClick={() => switchCaptureMode(config.capture_mode === "camera" ? "screen" : "camera")}
+            style={{
+              padding: '10px 20px',
+              background: 'rgba(255,255,255,0.1)',
+              border: '1px solid rgba(255,255,255,0.2)',
+              borderRadius: '8px',
+              color: '#fff',
+              fontSize: '14px',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.15)'}
+            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+          >
+            {config.capture_mode === "camera" ? '📷 切截图' : '🎥 切摄像头'}
+          </button>
+          <button
+            onClick={captureFrame}
+            style={{
+              padding: '10px 20px',
+              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+              border: 'none',
+              borderRadius: '8px',
+              color: '#fff',
+              fontSize: '14px',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
+            onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+          >
+            📸 手动截图
+          </button>
+          <button
+            onClick={() => setShowSettings(true)}
+            style={{
+              padding: '10px 20px',
+              background: 'rgba(255,255,255,0.1)',
+              border: '1px solid rgba(255,255,255,0.2)',
+              borderRadius: '8px',
+              color: '#fff',
+              fontSize: '14px',
+              cursor: 'pointer',
+              transition: 'all 0.2s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.15)'}
+            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+          >
+            ⚙️ 设置
+          </button>
         </div>
       </div>
 
@@ -724,39 +1062,11 @@ function App() {
               />
             </div>
             <div className="form-group">
-              <label>存储模式</label>
-              <select
-                value={config.mode}
-                onChange={(e) => setConfig({ ...config, mode: e.target.value })}
-              >
-                <option value="local">本地保存</option>
-                <option value="cloud">云端上传</option>
-              </select>
-            </div>
-            <div className="form-group">
-              <label>本地保存路径</label>
-              <input
-                type="text"
-                value={config.local_path}
-                onChange={(e) => setConfig({ ...config, local_path: e.target.value })}
-              />
-            </div>
-            <div className="form-group">
               <label>API地址</label>
               <input
                 type="text"
                 value={config.api_url}
                 onChange={(e) => setConfig({ ...config, api_url: e.target.value })}
-              />
-            </div>
-            <div className="form-group">
-              <label>保留天数</label>
-              <input
-                type="number"
-                value={config.retention_days}
-                onChange={(e) => setConfig({ ...config, retention_days: parseInt(e.target.value) || 7 })}
-                min="1"
-                max="365"
               />
             </div>
             <div className="form-group">
@@ -788,6 +1098,16 @@ function App() {
                 type="text"
                 value={config.api_url}
                 onChange={(e) => setConfig({ ...config, api_url: e.target.value })}
+                disabled={isLoggedIn}
+              />
+            </div>
+            <div className="form-group">
+              <label>租户名称</label>
+              <input
+                type="text"
+                value={config.tenant_name}
+                onChange={(e) => setConfig({ ...config, tenant_name: e.target.value })}
+                placeholder="请输入租户名称"
                 disabled={isLoggedIn}
               />
             </div>
