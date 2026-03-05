@@ -748,13 +748,16 @@ function App() {
           <div className="form-group" style={{ marginBottom: '20px' }}>
             <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>选择班级</label>
             <select
-              value={selectedClassId || ''}
-              onChange={(e) => setSelectedClassId(Number(e.target.value))}
+              value={selectedClassId?.toString() || ''}
+              onChange={(e) => {
+                const value = e.target.value;
+                setSelectedClassId(value ? parseInt(value, 10) : null);
+              }}
               style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', background: '#fff' }}
             >
               <option value="">请选择班级</option>
               {classList.map((cls) => (
-                <option key={cls.id} value={cls.id}>{cls.class_name}</option>
+                <option key={cls.id} value={cls.id.toString()}>{cls.class_name}</option>
               ))}
             </select>
           </div>
@@ -763,13 +766,13 @@ function App() {
           <div className="form-group" style={{ marginBottom: '20px' }}>
             <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>设备类型</label>
             <select
-              value={selectedDeviceType}
-              onChange={(e) => setSelectedDeviceType(Number(e.target.value))}
+              value={selectedDeviceType.toString()}
+              onChange={(e) => setSelectedDeviceType(parseInt(e.target.value, 10))}
               style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', background: '#fff' }}
             >
-              <option value={1}>智能黑板</option>
-              <option value={2}>智能多媒体设备</option>
-              <option value={3}>其他</option>
+              <option value="1">智能黑板</option>
+              <option value="2">智能多媒体设备</option>
+              <option value="3">其他</option>
             </select>
           </div>
 
