@@ -25,7 +25,21 @@
       "Bash(git tag:*)",
       "Bash(npx tsc:*)",
       "Bash(git checkout:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "mcp__plugin_compound-engineering_pw__browser_wait_for",
+      "mcp__plugin_compound-engineering_pw__browser_navigate",
+      "mcp__plugin_compound-engineering_pw__browser_take_screenshot",
+      "mcp__plugin_compound-engineering_pw__browser_click",
+      "mcp__plugin_compound-engineering_pw__browser_snapshot",
+      "mcp__plugin_compound-engineering_pw__browser_type",
+      "mcp__plugin_compound-engineering_pw__browser_fill_form",
+      "mcp__plugin_compound-engineering_pw__browser_evaluate",
+      "mcp__plugin_compound-engineering_pw__browser_run_code",
+      "Bash(pkill:*)",
+      "Bash(.targetdebugscreenshot-client.exe:*)",
+      "Bash(\"D:/develop/project/screen shot-client/screenshot-client/src-tauri/target/debug/screenshot-client.exe\":*)",
+      "mcp__plugin_compound-engineering_pw__browser_close",
+      "mcp__plugin_compound-engineering_pw__browser_console_messages"
     ]
   }
 }
