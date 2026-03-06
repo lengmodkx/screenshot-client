@@ -13,10 +13,17 @@ Content-Type: application/json
 **请求参数：**
 ```json
 {
+  "tenantName": "租户名称",
   "username": "账号",
   "password": "密码"
 }
 ```
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| tenantName | String | 是 | 租户名称（如：测试租户） |
+| username | String | 是 | 登录账号 |
+| password | String | 是 | 登录密码 |
 
 **返回：**
 ```json
@@ -410,6 +417,7 @@ Authorization: Bearer {accessToken}
 
 1. **登录获取Token**
    - 调用 `POST /client/inspection/login`
+   - 传入 `tenantName`（租户名称）、`username`、`password`
    - 保存返回的 `accessToken` 和 `deptId`
 
 2. **注册设备**

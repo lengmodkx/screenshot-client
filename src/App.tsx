@@ -1,5 +1,15 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { DeviceSetupWrapper } from "./DeviceSetupWrapper";
+
+// 设备类型名称
+const deviceTypeMap: Record<number, string> = {
+  1: '智能黑板',
+  2: '智能多媒体设备',
+  3: '其他'
+};
+
+
 
 // Mock data for browser preview
 const MOCK_CONFIG = {
@@ -11,7 +21,7 @@ const MOCK_CONFIG = {
   username: "admin",
   auto_start: false,
   retention_days: 7,
-  capture_mode: "camera",
+  capture_mode: "auto",      // "auto" | "camera" | "screen"
   camera_resolution: "1080p",
   // 新增字段
   account_username: "",
@@ -26,6 +36,9 @@ const MOCK_CONFIG = {
   dept_name: "",
   access_token: null,
   refresh_token: null,
+  // 后台运行配置
+  autostart_enabled: true,
+  show_window_on_start: false,
 };
 
 interface AppConfig {
@@ -37,7 +50,7 @@ interface AppConfig {
   username: string | null;
   auto_start: boolean;
   retention_days: number;
-  capture_mode: string;      // "camera" | "screen"
+  capture_mode: string;      // "auto" | "camera" | "screen"
   camera_resolution: string; // "480p" | "720p" | "1080p"
   // 新增字段
   account_username: string;
@@ -52,6 +65,9 @@ interface AppConfig {
   dept_name: string;
   access_token: string | null;
   refresh_token: string | null;
+  // 后台运行配置
+  autostart_enabled: boolean;
+  show_window_on_start: boolean;
 }
 
 interface Stats {
@@ -60,6 +76,10 @@ interface Stats {
 }
 
 function App() {
+  // App 组件渲染计数
+  const appRenderCount = useRef(0);
+  appRenderCount.current++;
+  
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [currentImage, setCurrentImage] = useState<string | null>(null);
   const [stats, setStats] = useState<Stats>({ todayCount: 0, lastCaptureTime: null });
@@ -75,12 +95,10 @@ function App() {
   const [hasCamera, setHasCamera] = useState(true);
   const [previewEnabled] = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [actualCaptureMode, setActualCaptureMode] = useState<"camera" | "screen">("camera");
   const [debugInfo, setDebugInfo] = useState<string>("");
   const [showDeviceSetup, setShowDeviceSetup] = useState(false);
   const [classList, setClassList] = useState<Array<{ id: number; class_name: string }>>([]);
-  const [selectedClassId, setSelectedClassId] = useState<number | null>(null);
-  const [selectedDeviceType, setSelectedDeviceType] = useState<number>(1);
-  const [customDeviceName, setCustomDeviceName] = useState<string>("");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -97,101 +115,86 @@ function App() {
     "1080p": { width: 1920, height: 1080 },
   };
 
-  // 初始化：加载配置、检查网络、检测摄像头、自动登录
+  // 初始化：加载配置（只在组件挂载时执行一次）
   useEffect(() => {
-    loadConfig();
-    checkNetwork();
-    detectCamera();
-    const interval = setInterval(checkNetwork, 30000);
-    return () => clearInterval(interval);
+    const init = async () => {
+      try {
+        const cfg = await invoke<AppConfig>("get_config");
+        setConfig(cfg);
+      } catch (e) {
+        console.error("Failed to load config, using mock:", e);
+        setConfig(MOCK_CONFIG);
+      }
+    };
+    init();
   }, []);
 
-  // 自动登录和注册检查
+  // 自动登录和注册检查 - 只执行一次（修复：移除isInitialized依赖）
+  const autoLoginStarted = useRef(false);
   useEffect(() => {
-    if (config && isInitialized && !isLoggedIn) {
-      // 检查是否有账号密码
-      if (!config.account_username || !config.account_password) {
-        // 账号密码为空，保持在登录页面让用户输入
-        return;
-      }
+    if (isLoggedIn) return;
+    if (autoLoginStarted.current) return;
+    if (!config) return;
+    
+    // 检查是否有账号密码
+    if (!config.account_username || !config.account_password) return;
 
-      // 有账号密码，自动登录
-      autoLoginAndRegister();
-    }
-  }, [config, isInitialized]);
+    autoLoginStarted.current = true;
+    
+    // 直接在这里执行登录逻辑
+    const doAutoLogin = async () => {
+      try {
+        setStatusMessage("正在自动登录...");
+        
+        const loginResult = await invoke<{
+          user_id: number;
+          username: string;
+          dept_id: number;
+          dept_name: string;
+          access_token: string;
+          refresh_token: string;
+          expires_time: string;
+        }>("auto_login");
 
-  // 自动登录并处理注册
-  const autoLoginAndRegister = async () => {
-    if (!config?.account_username || !config?.account_password) return;
+        console.log("自动登录成功");
+        setIsLoggedIn(true);
 
-    try {
-      setStatusMessage("正在自动登录...");
-
-      // 调用后端登录接口
-      const loginResult = await invoke<{
-        user_id: number;
-        username: string;
-        dept_id: number;
-        dept_name: string;
-        access_token: string;
-        refresh_token: string;
-        expires_time: string;
-      }>("auto_login");
-
-      console.log("自动登录成功:", loginResult);
-
-      // 更新登录状态
-      setIsLoggedIn(true);
-
-      // 重新加载配置，获取最新的是否已注册状态
-      const newConfig = await invoke<AppConfig>("get_config");
-      setConfig(newConfig);
-
-      // 检查是否已注册设备（使用新加载的配置）
-      if (newConfig.is_registered) {
-        // 已注册，直接进入摄像头页面
-        setStatusMessage("自动登录成功");
-      } else {
-        // 未注册，显示设备设置页面
-        setStatusMessage("请先设置班级和设备信息");
-        try {
-          const classes = await invoke<Array<{ id: number; className: string }>>("get_class_list");
-          console.log("班级列表:", classes);
-          const formattedClasses = classes.map(c => ({ id: c.id, class_name: c.className }));
-          setClassList(formattedClasses);
-          setDebugInfo(`加载到 ${classes.length} 个班级`);
+        // 检查是否已注册设备
+        if (config.is_registered) {
+          setStatusMessage("自动登录成功");
+        } else {
+          setStatusMessage("请先设置班级和设备信息");
+          try {
+            const classes = await invoke<Array<{ id: number; className: string }>>("get_class_list");
+            setClassList(classes.map(c => ({ id: c.id, class_name: c.className })));
+          } catch (e) {
+            console.error("获取班级列表失败:", e);
+          }
           setShowDeviceSetup(true);
-        } catch (e) {
-          console.error("获取班级列表失败:", e);
-          setDebugInfo(`获取班级列表失败: ${e}`);
-          setStatusMessage(`获取班级列表失败: ${e}`);
         }
+      } catch (e) {
+        console.error("自动登录失败:", e);
+        setStatusMessage(`自动登录失败: ${e}`);
       }
-    } catch (e) {
-      console.error("自动登录失败:", e);
-      setStatusMessage(`自动登录失败: ${e}`);
-      // 自动登录失败，保持在登录页面
-    }
-  };
+    };
+    
+    doAutoLogin();
+  }, [config, isLoggedIn]); // 移除isInitialized
 
-  // 启动心跳定时器
-  useEffect(() => {
-    if (isLoggedIn && config?.is_registered) {
-      // 立即发送一次心跳
-      sendHeartbeat();
-
-      // 每30秒发送一次心跳
-      heartbeatTimerRef.current = window.setInterval(() => {
-        sendHeartbeat();
-      }, 30000);
-
-      return () => {
-        if (heartbeatTimerRef.current) {
-          clearInterval(heartbeatTimerRef.current);
-        }
-      };
-    }
-  }, [isLoggedIn, config?.is_registered]);
+  // 启动心跳定时器 - 完全禁用
+  // useEffect(() => {
+  //   if (showDeviceSetup) return;
+  //   if (!isLoggedIn || !config?.is_registered) return;
+  //   sendHeartbeat();
+  //   heartbeatTimerRef.current = window.setInterval(() => {
+  //     sendHeartbeat();
+  //   }, 30000);
+  //   return () => {
+  //     if (heartbeatTimerRef.current) {
+  //       clearInterval(heartbeatTimerRef.current);
+  //     }
+  //   };
+  // }, [isLoggedIn, config?.is_registered, showDeviceSetup]);
 
   // 发送心跳
   const sendHeartbeat = async () => {
@@ -203,80 +206,118 @@ function App() {
   };
 
   // 检测摄像头
-  const detectCamera = async () => {
+  // 检测摄像头是否可用（包括权限检查）
+  const detectCamera = async (): Promise<boolean> => {
     try {
+      // 1. 检查是否有视频设备
       const devices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = devices.filter(d => d.kind === "videoinput");
-      setHasCamera(videoDevices.length > 0);
-    } catch {
+
+      if (videoDevices.length === 0) {
+        console.log("No video devices found");
+        setHasCamera(false);
+        return false;
+      }
+
+      // 2. 尝试获取摄像头权限
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      stream.getTracks().forEach(track => track.stop()); // 立即释放
+
+      console.log("Camera detected and accessible");
+      setHasCamera(true);
+      return true;
+    } catch (e) {
+      console.log("Camera not available:", e);
       setHasCamera(false);
+      return false;
     }
   };
 
-  // 配置加载后初始化（登录后才启动截图）
+  // 自动选择采集模式
+  const selectCaptureMode = async (): Promise<"camera" | "screen"> => {
+    if (!config) return "screen";
+
+    // 如果配置强制指定了模式
+    if (config.capture_mode === "camera") {
+      const hasCam = await detectCamera();
+      if (hasCam) return "camera";
+      console.warn("Camera mode requested but camera not available, falling back to screen");
+      return "screen";
+    }
+
+    if (config.capture_mode === "screen") {
+      return "screen";
+    }
+
+    // auto 模式：优先摄像头
+    const hasCam = await detectCamera();
+    return hasCam ? "camera" : "screen";
+  };
+
+  // 配置加载后初始化（登录后才启动截图）- 添加延迟避免注册时卡死
   useEffect(() => {
-    if (config && !isInitialized && isLoggedIn) {
-      const captureMode = config.capture_mode || "camera";
-
-      // 如果有摄像头且模式为摄像头模式，初始化摄像头
-      if (captureMode === "camera" && hasCamera) {
-        initCamera().then(() => {
-          if (!cameraError) {
-            captureAndPushFrame();
-            // 视频推送：每500ms（2帧/秒）
-            timerRef.current = window.setInterval(() => {
-              captureAndPushFrame();
-            }, 500);
-          }
-        });
-      } else {
-        // 无摄像头或模式为截图模式，直接开始截图
-        captureAndPushFrame();
-        // 视频推送：每500ms（2帧/秒）
-        timerRef.current = window.setInterval(() => {
-          captureAndPushFrame();
-        }, 500);
-      }
-
-      // 截图上传：每5分钟上传一次（用于后台查看静态画面）
-      uploadScreenshotFile();
-      screenshotTimerRef.current = window.setInterval(() => {
-        uploadScreenshotFile();
-      }, 5 * 60 * 1000);
-
+    if (showDeviceSetup) return; // 设备设置页面不启动截图
+    if (!config || isInitialized || !isLoggedIn) return;
+    
+    // 延迟启动截图，给注册流程足够时间完成
+    const timer = setTimeout(() => {
       setIsInitialized(true);
-    }
-  }, [config, hasCamera, isLoggedIn]);
+      selectCaptureMode().then((mode) => {
+        setActualCaptureMode(mode);
+        setStatusMessage(`使用${mode === "camera" ? "摄像头" : "屏幕截图"}模式`);
+        if (mode === "camera") {
+          initCamera().then(() => {
+            if (!cameraError) {
+              startCaptureLoop();
+            } else {
+              setActualCaptureMode("screen");
+              startCaptureLoop();
+            }
+          });
+        } else {
+          startCaptureLoop();
+        }
+      });
+    }, 500); // 500ms 延迟，确保注册流程完成
+    
+    return () => clearTimeout(timer);
+  }, [config, isLoggedIn, showDeviceSetup]);
 
-  // 监听 cameraError 变化，处理摄像头出错后恢复的情况（登录后才启动）
-  useEffect(() => {
-    if (config && !cameraError && isInitialized && !timerRef.current && isLoggedIn) {
-      captureAndPushFrame();
-      // 视频推送：每500ms（2帧/秒）
-      timerRef.current = window.setInterval(() => {
-        captureAndPushFrame();
-      }, 500);
-    }
-
-    return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-      if (screenshotTimerRef.current) {
-        clearInterval(screenshotTimerRef.current);
-        screenshotTimerRef.current = null;
-      }
-    };
-  }, [cameraError, config, isInitialized, isLoggedIn]);
-
-  const loadConfig = async () => {
+  const loadConfig = useCallback(async () => {
     try {
       const cfg = await invoke<AppConfig>("get_config");
       setConfig(cfg);
     } catch (e) {
       console.error("Failed to load config, using mock:", e);
       setConfig(MOCK_CONFIG);
+    }
+  }, []);
+
+  // 内部处理设备注册
+  const handleDeviceRegisterInternal = async (classId: number, deviceType: number, deviceName: string) => {
+    console.log("[handleDeviceRegisterInternal] 开始注册:", { classId, deviceType, deviceName });
+
+    try {
+      // 直接调用注册
+      await invoke("register_device", {
+        deviceName: deviceName,
+        schoolClassId: classId,
+        deviceType: deviceType
+      });
+
+      console.log("[handleDeviceRegisterInternal] 注册成功");
+
+      // 关闭设备设置页面
+      setShowDeviceSetup(false);
+      
+      // 延迟设置登录状态
+      setTimeout(() => {
+        setIsLoggedIn(true);
+      }, 100);
+
+    } catch (e) {
+      console.error("[handleDeviceRegisterInternal] 设备注册失败:", e);
+      alert(`设备注册失败: ${e}`);
     }
   };
 
@@ -336,11 +377,29 @@ function App() {
     }
   };
 
+  // 启动采集循环
+  const startCaptureLoop = () => {
+    // 立即执行一次
+    captureAndPushFrame();
+
+    // 视频推送：每500ms（2帧/秒）
+    timerRef.current = window.setInterval(() => {
+      captureAndPushFrame();
+    }, 500);
+
+    // 截图上传：每5分钟上传一次（用于后台查看静态画面）
+    uploadScreenshotFile();
+    screenshotTimerRef.current = window.setInterval(() => {
+      uploadScreenshotFile();
+    }, 5 * 60 * 1000);
+  };
+
   // 捕获帧并推送到视频流（每500ms调用一次，2帧/秒）
   const captureAndPushFrame = async () => {
     if (!config) return;
 
-    const captureMode = config.capture_mode || "camera";
+    // 使用实际选择的采集模式
+    const captureMode = actualCaptureMode;
 
     // 摄像头模式
     if (captureMode === "camera" && hasCamera && !cameraError && videoRef.current && canvasRef.current) {
@@ -363,7 +422,7 @@ function App() {
         // 转为 base64
         const imageData = canvas.toDataURL('image/png');
         setCurrentImage(imageData);
-        currentImageRef.current = imageData; // 保存到 ref 供截图上传使用
+        currentImageRef.current = imageData;
 
         const now = new Date();
         const timeStr = now.toLocaleTimeString();
@@ -386,7 +445,7 @@ function App() {
       try {
         const imageData = await invoke<string>("capture_screen");
         setCurrentImage(imageData);
-        currentImageRef.current = imageData; // 保存到 ref 供截图上传使用
+        currentImageRef.current = imageData;
 
         const now = new Date();
         const timeStr = now.toLocaleTimeString();
@@ -440,7 +499,8 @@ function App() {
       await invoke("login", { username, password });
       setShowLogin(false);
       setLoginError("");
-      loadConfig();
+      await loadConfig();
+      setIsLoggedIn(true);  // 设置登录状态
       setStatusMessage("登录成功");
     } catch (e) {
       setLoginError(`登录失败: ${e}`);
@@ -486,8 +546,11 @@ function App() {
       // 重新加载配置以获取最新的用户信息
       await loadConfig();
 
-      // 检查是否已注册设备（使用 updatedConfig，因为 config 状态还未更新）
-      if (updatedConfig.is_registered) {
+      // 登录成功后重新获取最新配置来判断是否已注册
+      const latestConfig = await invoke<AppConfig>("get_config");
+
+      // 检查是否已注册设备
+      if (latestConfig.is_registered) {
         // 已注册，直接进入摄像头页面
         setStatusMessage("登录成功");
       } else {
@@ -501,46 +564,18 @@ function App() {
           const formattedClasses = classes.map(c => ({ id: c.id, class_name: c.className }));
           setClassList(formattedClasses);
           setDebugInfo(`加载到 ${classes.length} 个班级`);
-          setShowDeviceSetup(true);
         } catch (e) {
           console.error("获取班级列表失败:", e);
           setDebugInfo(`获取班级列表失败: ${e}`);
-          setStatusMessage(`获取班级列表失败: ${e}`);
+          // 即使获取班级列表失败，也显示设备注册页面（班级列表为空）
         }
+        // 无论如何都显示设备注册页面
+        setShowDeviceSetup(true);
       }
 
     } catch (e) {
       console.error("登录失败:", e);
       setStatusMessage(`登录失败: ${e}`);
-    }
-  };
-
-  // 处理设备注册
-  const handleDeviceRegister = async () => {
-    if (!selectedClassId) {
-      setStatusMessage("请选择班级");
-      return;
-    }
-
-    const deviceName = selectedDeviceType === 3
-      ? (customDeviceName || "其他设备")
-      : (selectedDeviceType === 1 ? "智能黑板" : "智能多媒体设备");
-
-    try {
-      setStatusMessage("正在注册设备...");
-      await invoke("register_device", {
-        deviceName: deviceName,
-        schoolClassId: selectedClassId,
-        deviceType: selectedDeviceType
-      });
-      setStatusMessage("设备注册成功");
-      setShowDeviceSetup(false);
-      // 重新加载配置
-      await loadConfig();
-    } catch (e) {
-      console.error("设备注册失败:", e);
-      setStatusMessage(`设备注册失败: ${e}`);
-      setDebugInfo(`注册失败: ${e}`);
     }
   };
 
@@ -591,15 +626,24 @@ function App() {
     };
   }, []);
 
+  // 配置加载中
   if (!config) {
-    return <div className="loading">加载中...</div>;
+    return <div style={{ padding: '20px' }}>加载中...</div>;
+  }
+
+  // 设备设置页面 - 使用稳定的 React 组件
+  if (showDeviceSetup) {
+    return <DeviceSetupWrapper 
+      classList={classList}
+      onRegister={handleDeviceRegisterInternal}
+    />;
   }
 
   // 未登录时显示登录界面
   if (!isLoggedIn) {
     return (
-      <div className="app" style={{ justifyContent: 'center', alignItems: 'center', background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)' }}>
-        <div className="login-container" style={{ width: '100%', maxWidth: '400px', padding: '48px', background: 'rgba(255,255,255,0.95)', borderRadius: '24px', boxShadow: '0 8px 32px rgba(0,0,0,0.3)' }}>
+      <div className="app" style={{ height: '100vh', overflow: 'auto', justifyContent: 'center', alignItems: 'center', background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)', padding: '20px', boxSizing: 'border-box' }}>
+        <div className="login-container" style={{ width: '100%', maxWidth: '400px', padding: '32px', background: 'rgba(255,255,255,0.95)', borderRadius: '24px', boxShadow: '0 8px 32px rgba(0,0,0,0.3)', margin: 'auto' }}>
           <div style={{ textAlign: 'center', marginBottom: '36px' }}>
             <div style={{ width: '64px', height: '64px', margin: '0 auto 16px', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', borderRadius: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '32px' }}>
               📷
@@ -663,88 +707,6 @@ function App() {
           </button>
           {debugInfo && (
             <div style={{ marginTop: '16px', padding: '12px', background: '#f5f5f5', borderRadius: '8px', fontSize: '12px', color: '#666', wordBreak: 'break-all', maxHeight: '200px', overflow: 'auto' }}>
-              <strong>调试信息:</strong><br/>
-              {debugInfo}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // 设备设置页面（首次登录后显示）
-  if (showDeviceSetup) {
-    return (
-      <div className="app" style={{ justifyContent: 'center', alignItems: 'center', background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)' }}>
-        <div style={{ width: '100%', maxWidth: '400px', padding: '48px', background: 'rgba(255,255,255,0.95)', borderRadius: '24px', boxShadow: '0 8px 32px rgba(0,0,0,0.3)' }}>
-          <div style={{ textAlign: 'center', marginBottom: '36px' }}>
-            <div style={{ width: '64px', height: '64px', margin: '0 auto 16px', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', borderRadius: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '32px' }}>
-              ⚙️
-            </div>
-            <h2 style={{ color: '#1a1a2e', fontSize: '26px', fontWeight: '700', margin: 0 }}>设备设置</h2>
-            <p style={{ color: '#666', marginTop: '8px', fontSize: '14px' }}>请选择班级和设备类型</p>
-          </div>
-
-          {/* 班级选择 */}
-          <div className="form-group" style={{ marginBottom: '20px' }}>
-            <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>选择班级</label>
-            <select
-              value={selectedClassId || ''}
-              onChange={(e) => setSelectedClassId(Number(e.target.value))}
-              style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', background: '#fff' }}
-            >
-              <option value="">请选择班级</option>
-              {classList.map((cls) => (
-                <option key={cls.id} value={cls.id}>{cls.class_name}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* 设备类型选择 */}
-          <div className="form-group" style={{ marginBottom: '20px' }}>
-            <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>设备类型</label>
-            <select
-              value={selectedDeviceType}
-              onChange={(e) => setSelectedDeviceType(Number(e.target.value))}
-              style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', background: '#fff' }}
-            >
-              <option value={1}>智能黑板</option>
-              <option value={2}>智能多媒体设备</option>
-              <option value={3}>其他</option>
-            </select>
-          </div>
-
-          {/* 自定义设备名称（选择"其他"时显示） */}
-          {selectedDeviceType === 3 && (
-            <div className="form-group" style={{ marginBottom: '20px' }}>
-              <label style={{ display: 'block', marginBottom: '8px', color: '#333', fontWeight: '500', fontSize: '14px' }}>设备名称</label>
-              <input
-                type="text"
-                value={customDeviceName}
-                onChange={(e) => setCustomDeviceName(e.target.value)}
-                placeholder="请输入设备名称"
-                style={{ width: '100%', padding: '14px 16px', border: '2px solid #e0e0e0', borderRadius: '12px', fontSize: '15px', boxSizing: 'border-box' }}
-              />
-            </div>
-          )}
-
-          {statusMessage && (
-            <p style={{ textAlign: 'center', marginBottom: '20px', padding: '12px', background: statusMessage.includes('成功') ? '#e8f5e9' : '#ffebee', color: statusMessage.includes('成功') ? '#2e7d32' : '#c62828', borderRadius: '8px', fontSize: '14px' }}>
-              {statusMessage}
-            </p>
-          )}
-
-          <button
-            onClick={handleDeviceRegister}
-            style={{ width: '100%', padding: '16px', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', color: 'white', border: 'none', borderRadius: '12px', fontSize: '16px', fontWeight: '600', cursor: 'pointer', transition: 'all 0.3s', boxShadow: '0 4px 15px rgba(102, 126, 234, 0.4)' }}
-            onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
-            onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
-          >
-            完成设置
-          </button>
-
-          {debugInfo && (
-            <div style={{ marginTop: '16px', padding: '12px', background: '#f5f5f5', borderRadius: '8px', fontSize: '12px', color: '#666', wordBreak: 'break-all' }}>
               <strong>调试信息:</strong><br/>
               {debugInfo}
             </div>
@@ -842,7 +804,7 @@ function App() {
               autoPlay
               playsInline
               muted
-              style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
+              style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
             />
           )}
           {/* 屏幕截图显示 */}

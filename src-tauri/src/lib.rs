@@ -6,6 +6,8 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
+use tauri::Manager;
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 
 // 配置结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +35,9 @@ pub struct AppConfig {
     pub dept_name: String,         // 学校/部门名称
     pub access_token: Option<String>,  // 访问令牌
     pub refresh_token: Option<String>, // 刷新令牌
+    // 后台运行配置
+    pub autostart_enabled: bool,    // 开机自启开关
+    pub show_window_on_start: bool, // 启动时是否显示窗口
 }
 
 impl Default for AppConfig {
@@ -67,6 +72,9 @@ impl Default for AppConfig {
             dept_name: String::new(),
             access_token: None,
             refresh_token: None,
+            // 后台运行默认值
+            autostart_enabled: true,
+            show_window_on_start: false,
         }
     }
 }
@@ -212,14 +220,18 @@ async fn login(
     password: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+    // 使用作用域限制锁的生命周期，避免死锁
+    let api_url = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+        config.api_url.clone()
+    };
 
     let client = reqwest::Client::builder()
         .no_proxy()
         .build()
         .map_err(|e| e.to_string())?;
     let response = client
-        .post(&format!("{}/api/login", config.api_url))
+        .post(&format!("{}/api/login", api_url))
         .json(&serde_json::json!({
             "username": username,
             "password": password
@@ -365,62 +377,19 @@ fn detect_camera() -> Result<Vec<String>, String> {
 // 获取 MAC 地址作为设备编码
 #[tauri::command]
 fn get_mac_address() -> Result<String, String> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        // 获取第一个 MAC 地址
-        let output = Command::new("powershell")
-            .args(["-Command", "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -First 1 -ExpandProperty MacAddress"])
-            .output();
-
-        match output {
-            Ok(out) => {
-                let mac = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if mac.is_empty() {
-                    // 如果获取不到，返回一个随机编码
-                    Ok(format!("DEVICE_{}", uuid::Uuid::new_v4().to_string().replace("-", "")[..8].to_uppercase()))
-                } else {
-                    // 格式化 MAC 地址
-                    let mac_clean = mac.replace(":", "-").replace("-", "");
-                    Ok(format!("DEV_{}", mac_clean.to_uppercase()))
-                }
-            }
-            Err(_) => Ok(format!("DEVICE_{}", uuid::Uuid::new_v4().to_string().replace("-", "")[..8].to_uppercase())),
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(format!("DEVICE_{}", uuid::Uuid::new_v4().to_string().replace("-", "")[..8].to_uppercase()))
-    }
+    println!("[get_mac_address] 使用UUID生成设备编码...");
+    // 直接使用UUID，避免PowerShell阻塞
+    let uuid_str = uuid::Uuid::new_v4().to_string().replace("-", "");
+    let device_code = format!("DEVICE_{}", &uuid_str[..12].to_uppercase());
+    println!("[get_mac_address] 设备编码: {}", device_code);
+    Ok(device_code)
 }
 
 // 获取本地 IP 地址
 fn get_local_ip() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        let output = Command::new("powershell")
-            .args(["-Command", "Get-NetIPAddress | Where-Object {$_.AddressFamily -eq 'IPv4' -and $_.IPAddress -notlike '127.*'} | Select-Object -First 1 -ExpandProperty IPAddress"])
-            .output();
-
-        match output {
-            Ok(out) => {
-                let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if ip.is_empty() {
-                    "127.0.0.1".to_string()
-                } else {
-                    ip
-                }
-            }
-            Err(_) => "127.0.0.1".to_string(),
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        "127.0.0.1".to_string()
-    }
+    println!("[get_local_ip] 使用默认IP...");
+    // 使用固定IP，避免PowerShell阻塞
+    "192.168.1.100".to_string()
 }
 
 // 登录响应结构
@@ -451,9 +420,18 @@ struct LoginData {
 // 自动登录
 #[tauri::command]
 async fn auto_login(state: State<'_, AppState>) -> Result<LoginData, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+    // 使用作用域限制锁的生命周期，避免死锁
+    let (account_username, account_password, api_url, tenant_name) = {
+        let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+        (
+            config.account_username.clone(),
+            config.account_password.clone(),
+            config.api_url.clone(),
+            config.tenant_name.clone(),
+        )
+    };
 
-    if config.account_username.is_empty() || config.account_password.is_empty() {
+    if account_username.is_empty() || account_password.is_empty() {
         return Err("请先配置账号密码".to_string());
     }
 
@@ -464,12 +442,12 @@ async fn auto_login(state: State<'_, AppState>) -> Result<LoginData, String> {
         .map_err(|e| format!("创建HTTP客户端失败: {}", e))?;
 
     let response = client
-        .post(&format!("{}/client/inspection/login", config.api_url))
+        .post(&format!("{}/client/inspection/login", api_url))
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
-            "username": config.account_username,
-            "password": config.account_password,
-            "tenantName": config.tenant_name
+            "username": account_username,
+            "password": account_password,
+            "tenantName": tenant_name
         }))
         .send()
         .await
@@ -525,35 +503,79 @@ struct ClassListResponse {
 // 获取班级列表
 #[tauri::command]
 async fn get_class_list(state: State<'_, AppState>) -> Result<Vec<ClassInfo>, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+    println!("[get_class_list] 开始获取班级列表...");
 
-    let token = config.access_token.ok_or("未登录")?;
+    let config = match state.config.lock() {
+        Ok(guard) => {
+            println!("[get_class_list] 获取配置锁成功");
+            guard.clone()
+        }
+        Err(e) => {
+            println!("[get_class_list] 获取配置锁失败: {}", e);
+            return Err(format!("获取配置锁失败: {}", e));
+        }
+    };
 
+    println!("[get_class_list] API地址: {}", config.api_url);
+
+    let token = match config.access_token {
+        Some(t) => {
+            println!("[get_class_list] 获取token成功");
+            t
+        }
+        None => {
+            println!("[get_class_list] 未登录，没有token");
+            return Err("未登录".to_string());
+        }
+    };
+
+    println!("[get_class_list] 创建HTTP客户端...");
     let client = reqwest::Client::builder()
         .no_proxy()
         .build()
         .map_err(|e| e.to_string())?;
+
+    let url = format!("{}/admin-api/hc/school-class/simple-list", config.api_url);
+    println!("[get_class_list] 发送请求到: {}", url);
+
     let response = client
-        .get(&format!("{}/admin-api/hc/school-class/simple-list", config.api_url))
+        .get(&url)
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            println!("[get_class_list] 请求失败: {}", e);
+            e.to_string()
+        })?;
+
+    println!("[get_class_list] 收到响应，状态: {}", response.status());
 
     if response.status().is_success() {
         // 先获取原始文本用于调试
-        let text = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
-        println!("班级列表响应原始内容: {}", text);
+        println!("[get_class_list] 读取响应体...");
+        let text = response.text().await.map_err(|e| {
+            println!("[get_class_list] 读取响应失败: {}", e);
+            format!("读取响应失败: {}", e)
+        })?;
+        println!("[get_class_list] 响应内容: {}", text);
 
+        println!("[get_class_list] 解析JSON...");
         let result: ClassListResponse = serde_json::from_str(&text)
-            .map_err(|e| format!("解析响应失败: {}，原始内容: {}", e, text))?;
+            .map_err(|e| {
+                println!("[get_class_list] 解析响应失败: {}", e);
+                format!("解析响应失败: {}，原始内容: {}", e, text)
+            })?;
 
         if result.code == 0 {
-            Ok(result.data.unwrap_or_default())
+            let data = result.data.unwrap_or_default();
+            println!("[get_class_list] 成功，获取到 {} 个班级", data.len());
+            Ok(data)
         } else {
+            println!("[get_class_list] API返回错误: {}", result.msg);
             Err(format!("获取班级列表失败: {}", result.msg))
         }
     } else {
+        println!("[get_class_list] HTTP错误: {}", response.status());
         Err(format!("获取班级列表失败: {}", response.status()))
     }
 }
@@ -610,35 +632,58 @@ async fn register_device(
     device_type: Option<i32>,
     state: State<'_, AppState>,
 ) -> Result<RegisterData, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+    println!("[register_device] 开始设备注册...");
+    println!("[register_device] 设备名称: {}, 班级ID: {}", device_name, school_class_id);
 
-    let token = config.access_token.ok_or("未登录")?;
-    let device_code = if config.device_code.is_empty() {
+    // 使用作用域限制锁的生命周期，避免死锁
+    let (token, device_code, dept_id, api_url) = {
+        println!("[register_device] 获取配置锁...");
+        let mut config = state.config.lock().map_err(|e| e.to_string())?;
+        println!("[register_device] 获取配置锁成功");
+
+        let token = config.access_token.clone().ok_or("未登录")?;
+        println!("[register_device] 获取token成功");
+
         // 如果没有设备编码，先生成一个
-        let mac = get_mac_address()?;
-        let mut cfg = state.config.lock().map_err(|e| e.to_string())?;
-        cfg.device_code = mac.clone();
-        save_config(&cfg)?;
-        mac
-    } else {
-        config.device_code
-    };
+        if config.device_code.is_empty() {
+            println!("[register_device] 设备编码为空，生成MAC地址...");
+            let mac = get_mac_address()?;
+            println!("[register_device] MAC地址生成成功: {}", mac);
+            config.device_code = mac.clone();
+            save_config(&config)?;
+        }
 
-    let dept_id = config.dept_id.ok_or("未获取到部门ID")?;
+        let device_code = config.device_code.clone();
+        let dept_id = config.dept_id.ok_or("未获取到部门ID")?;
+        let api_url = config.api_url.clone();
+
+        println!("[register_device] 配置获取完成: device_code={}, dept_id={}", device_code, dept_id);
+        (token, device_code, dept_id, api_url)
+    }; // 锁在这里释放
+
+    println!("[register_device] 获取本地IP地址...");
     let ip_address = get_local_ip();
+    println!("[register_device] 本地IP: {}", ip_address);
 
+    println!("[register_device] 创建HTTP客户端...");
     let client = reqwest::Client::builder()
         .no_proxy()
+        .timeout(std::time::Duration::from_secs(30)) // 添加30秒超时
         .build()
         .map_err(|e| e.to_string())?;
+
     // 从 dept_id 获取租户ID（芋道框架通常使用部门ID作为租户ID）
     let tenant_id = dept_id;
 
     // API文档：deviceType: 1-电子大屏，2-黑板
     let device_type_value = device_type.unwrap_or(2); // 默认黑板
 
+    println!("[register_device] 发送注册请求到: {}/client/inspection/register", api_url);
+    println!("[register_device] 请求参数: deviceCode={}, deviceName={}, deviceType={}, classroomId={}",
+             device_code, device_name, device_type_value, school_class_id);
+
     let response = client
-        .post(&format!("{}/client/inspection/register", config.api_url))
+        .post(&format!("{}/client/inspection/register", api_url))
         .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("tenant-id", tenant_id.to_string())
@@ -652,18 +697,35 @@ async fn register_device(
         ])
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            println!("[register_device] 请求发送失败: {}", e);
+            e.to_string()
+        })?;
+
+    println!("[register_device] 收到响应，状态: {}", response.status());
 
     if response.status().is_success() {
         // 先获取原始文本用于调试
-        let text = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
-        println!("设备注册响应原始内容: {}", text);
+        println!("[register_device] 读取响应体...");
+        let text = response.text().await.map_err(|e| {
+            println!("[register_device] 读取响应失败: {}", e);
+            format!("读取响应失败: {}", e)
+        })?;
+        println!("[register_device] 响应内容: {}", text);
 
+        println!("[register_device] 解析JSON...");
         let result: RegisterResponse = serde_json::from_str(&text)
-            .map_err(|e| format!("解析响应失败: {}，原始内容: {}", e, text))?;
+            .map_err(|e| {
+                println!("[register_device] 解析响应失败: {}", e);
+                format!("解析响应失败: {}，原始内容: {}", e, text)
+            })?;
+
+        println!("[register_device] API返回code: {}, msg: {}", result.code, result.msg);
 
         if result.code == 0 || result.code == 1030670002 { // 0-成功，1030670002-设备已注册
+            println!("[register_device] 注册成功或有数据返回");
             if let Some(data) = result.data {
+                println!("[register_device] 保存注册信息到配置...");
                 // 保存注册信息
                 let mut config = state.config.lock().map_err(|e| e.to_string())?;
                 config.device_name = data.device_name.clone();
@@ -671,9 +733,11 @@ async fn register_device(
                 config.device_id = Some(data.id);
                 config.is_registered = true;
                 save_config(&config)?;
+                println!("[register_device] 注册信息保存成功");
 
                 Ok(data)
             } else {
+                println!("[register_device] 设备已注册但无返回数据，构造基本信息...");
                 // 设备已注册但没有返回数据，构造一个基本信息
                 let mut config = state.config.lock().map_err(|e| e.to_string())?;
                 config.device_name = device_name.clone();
@@ -966,14 +1030,45 @@ async fn check_network(api_url: String) -> Result<bool, String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// 检查是否是从开机自启启动
+fn is_autostart(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--autostart")
+}
+
 pub fn run() {
     env_logger::init();
     let config = load_config();
+
+    // 判断是否需要显示窗口：
+    // 1. 未登录（无账号密码）→ 显示登录页
+    // 2. 已登录但未注册 → 显示设备注册页
+    // 3. 已登录且已注册 → 最小化到托盘
+    let need_show_window = config.account_username.is_empty()
+        || config.account_password.is_empty()
+        || !config.is_registered;
+
+    println!("启动检查: username={}, password={}, is_registered={}",
+        !config.account_username.is_empty(),
+        !config.account_password.is_empty(),
+        config.is_registered);
+    println!("是否需要显示窗口: {}", need_show_window);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 当检测到第二个实例时，显示已存在的窗口
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(AppState {
             config: Mutex::new(config),
             is_running: Mutex::new(false),
@@ -998,7 +1093,108 @@ pub fn run() {
             send_heartbeat,
             upload_screenshot_v2,
             upload_screenshot_file,
+            toggle_window,
+            exit_app,
         ])
+        .setup(move |app| {
+            // 获取命令行参数
+            let args: Vec<String> = std::env::args().collect();
+            let from_autostart = is_autostart(&args);
+
+            // 创建系统托盘
+            let tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("截图客户端")
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { .. } = event {
+                        let app = tray.app_handle();
+                        toggle_window_visibility(app);
+                    }
+                })
+                .build(app)?;
+
+            // 设置全局快捷键 Ctrl+Shift+S（暂时禁用，避免热键冲突）
+            // #[cfg(desktop)]
+            // {
+            //     use tauri_plugin_global_shortcut::GlobalShortcutExt;
+            //     app.handle().plugin(
+            //         tauri_plugin_global_shortcut::Builder::new()
+            //             .with_handler(|app, shortcut, _event| {
+            //                 if shortcut.matches(
+            //                     tauri_plugin_global_shortcut::Modifiers::CONTROL | tauri_plugin_global_shortcut::Modifiers::SHIFT,
+            //                     tauri_plugin_global_shortcut::Code::KeyS,
+            //                 ) {
+            //                     toggle_window_visibility(app);
+            //                 }
+            //             })
+            //             .build(),
+            //     )?;
+            //
+            //     // 注册快捷键
+            //     let shortcut = tauri_plugin_global_shortcut::Shortcut::new(
+            //         Some(tauri_plugin_global_shortcut::Modifiers::CONTROL | tauri_plugin_global_shortcut::Modifiers::SHIFT),
+            //         tauri_plugin_global_shortcut::Code::KeyS,
+            //     );
+            //     app.global_shortcut().register(shortcut)?;
+            // }
+
+            // 设置窗口行为：关闭时最小化到托盘
+            println!("setup: 开始设置窗口");
+            if let Some(window) = app.get_webview_window("main") {
+                println!("setup: 获取到主窗口");
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window_clone.hide();
+                    }
+                });
+
+                // 根据用户登录/注册状态决定是否显示窗口：
+                // - 未登录 → 显示登录页
+                // - 已登录未注册 → 显示设备注册页
+                // - 已登录已注册 → 最小化到托盘
+                println!("setup: need_show_window = {}", need_show_window);
+                if need_show_window {
+                    println!("显示窗口（登录或注册页面）");
+                    let show_result = window.show();
+                    let focus_result = window.set_focus();
+                    println!("setup: show_result = {:?}, focus_result = {:?}", show_result, focus_result);
+                } else {
+                    println!("已登录且已注册，最小化到托盘");
+                    let _ = window.hide();
+                }
+            } else {
+                println!("setup: 未能获取主窗口");
+            }
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// 切换窗口显示/隐藏
+fn toggle_window_visibility(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(true) = window.is_visible() {
+            let _ = window.hide();
+        } else {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+// 命令：切换窗口显示/隐藏
+#[tauri::command]
+fn toggle_window(app: tauri::AppHandle) {
+    toggle_window_visibility(&app);
+}
+
+// 命令：完全退出应用
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }

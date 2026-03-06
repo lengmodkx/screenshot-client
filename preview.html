@@ -1,3 +1,10 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>截图客户端</title>
+  <style>
 * {
   box-sizing: border-box;
   margin: 0;
@@ -6,23 +13,18 @@
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #0a0a0f;
+  background: linear-gradient(180deg, #f5f7fa 0%, #e4e8ec 100%);
   color: #333;
   min-height: 100vh;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
+  padding: 20px;
 }
 
 .app {
-  min-height: 100vh;
+  max-width: 480px;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
-  padding: 0;
-  gap: 0;
-  width: 100%;
-  max-width: none;
-  margin: 0;
+  gap: 20px;
 }
 
 /* 顶部状态栏 */
@@ -56,16 +58,8 @@ body {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-}
-
-.status-dot.online {
   background: #81c784;
   box-shadow: 0 0 8px #81c784;
-}
-
-.status-dot.offline {
-  background: #ef9a9a;
-  box-shadow: 0 0 8px #ef9a9a;
 }
 
 /* 主控制按钮 - 大大居中 */
@@ -110,20 +104,10 @@ body {
   box-shadow: 0 6px 20px rgba(229, 57, 53, 0.4);
 }
 
-.btn-stop:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 8px 24px rgba(229, 57, 53, 0.5);
-}
-
 .btn-capture {
   background: linear-gradient(135deg, #1e88e5 0%, #42a5f5 100%);
   color: white;
   box-shadow: 0 6px 20px rgba(30, 136, 229, 0.4);
-}
-
-.btn-capture:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 8px 24px rgba(30, 136, 229, 0.5);
 }
 
 /* 副按钮区 - 简洁行 */
@@ -223,37 +207,6 @@ body {
   font-size: 14px;
   font-weight: 600;
   color: #2e7d32;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.preview-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.preview-controls button {
-  padding: 4px 10px;
-  border: 1px solid #c8e6c9;
-  border-radius: 6px;
-  background: white;
-  font-size: 12px;
-  color: #2e7d32;
-  cursor: pointer;
-}
-
-.preview-controls button:hover {
-  background: #f1f8e9;
-}
-
-.preview-controls select {
-  padding: 4px 8px;
-  border: 1px solid #c8e6c9;
-  border-radius: 6px;
-  font-size: 12px;
-  color: #2e7d32;
 }
 
 .preview-body {
@@ -267,18 +220,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
-}
-
-.preview-image img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-}
-
-.preview-placeholder {
   color: #bdbdbd;
-  font-size: 14px;
 }
 
 .status-text {
@@ -290,111 +232,71 @@ body {
   color: #43a047;
   font-size: 13px;
 }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- 顶部状态栏 -->
+    <div class="top-bar">
+      <h1>截图客户端</h1>
+      <div class="status-badge">
+        <span class="status-dot"></span>
+        <span>在线</span>
+      </div>
+    </div>
 
-/* Loading */
-.loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100vh;
-  font-size: 16px;
-  color: #666;
-}
+    <!-- 主控制按钮 - 大大居中 -->
+    <div class="main-controls">
+      <button class="btn-large btn-stop">■ 停止</button>
+      <button class="btn-large btn-capture">📷 截图</button>
+    </div>
 
-/* Modal */
-.modal {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-  backdrop-filter: blur(4px);
-}
+    <!-- 副按钮 -->
+    <div class="secondary-controls">
+      <button class="btn-small">⚙️ 设置</button>
+      <button class="btn-small">🚪 登出</button>
+    </div>
 
-.modal-content {
-  background: white;
-  border-radius: 20px;
-  padding: 28px;
-  width: 90%;
-  max-width: 380px;
-  max-height: 85vh;
-  overflow-y: auto;
-  box-shadow: 0 24px 48px rgba(0,0,0,0.2);
-}
+    <!-- 信息 -->
+    <div class="info-section">
+      <div class="info-row">
+        <span class="info-label">运行状态</span>
+        <span class="info-value" style="color:#2e7d32">工作中</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">存储模式</span>
+        <span class="info-value">云端上传</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">截图间隔</span>
+        <span class="info-value">10 秒</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">登录用户</span>
+        <span class="info-value">admin</span>
+      </div>
+    </div>
 
-.modal-content h2 {
-  font-size: 20px;
-  margin-bottom: 24px;
-  color: #2e7d32;
-  text-align: center;
-  font-weight: 600;
-}
+    <!-- 统计 -->
+    <div class="stats-section">
+      <div class="stat-card">
+        <div class="stat-number">42</div>
+        <div class="stat-label">今日截图</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">14:32:05</div>
+        <div class="stat-label">最后截图</div>
+      </div>
+    </div>
 
-.form-group {
-  margin-bottom: 20px;
-}
-
-.form-group label {
-  display: block;
-  font-size: 14px;
-  color: #616161;
-  margin-bottom: 10px;
-  font-weight: 500;
-}
-
-.form-group input,
-.form-group select {
-  width: 100%;
-  padding: 14px 16px;
-  border: 1px solid #e0e0e0;
-  border-radius: 12px;
-  font-size: 15px;
-  outline: none;
-  transition: all 0.2s;
-}
-
-.form-group input:focus,
-.form-group select:focus {
-  border-color: #43a047;
-  box-shadow: 0 0 0 3px rgba(67, 160, 71, 0.15);
-}
-
-.modal-actions {
-  display: flex;
-  gap: 14px;
-  margin-top: 28px;
-}
-
-.modal-actions button {
-  flex: 1;
-  padding: 14px;
-  border: none;
-  border-radius: 12px;
-  font-size: 15px;
-  cursor: pointer;
-  background: linear-gradient(135deg, #43a047 0%, #66bb6a 100%);
-  color: white;
-  font-weight: 600;
-}
-
-.modal-actions button.cancel {
-  background: white;
-  border: 2px solid #e0e0e0;
-  color: #757575;
-}
-
-.modal-actions button:hover {
-  opacity: 0.9;
-}
-
-.error {
-  color: #e53935;
-  font-size: 13px;
-  margin-top: 10px;
-  text-align: center;
-}
+    <!-- 预览 -->
+    <div class="preview-section">
+      <div class="preview-header">🖼️ 最新截图</div>
+      <div class="preview-body">
+        <div class="preview-image">[截图预览]</div>
+        <div class="status-text">已上传 - 14:32:05</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

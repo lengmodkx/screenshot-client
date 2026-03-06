@@ -25,3 +25,19 @@ dist-ssr
 
 # Rust
 src-tauri/target/
+
+# Test screenshots and temp files
+.playwright-mcp/
+*.png
+*.jpg
+*.jpeg
+!public/**/*.png
+!public/**/*.jpg
+!assets/**/*.png
+!assets/**/*.jpg
+
+# Temporary files
+NUL
+nul
+current-*.md
+*-snapshot.md
