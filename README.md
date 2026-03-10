@@ -6,6 +6,7 @@
 
 - **实时视频流**：以 2 帧/秒的频率推送视频帧到服务端，支持远程实时查看
 - **定时截图**：每 5 分钟上传一次截图，供后台查看设备静态画面
+- **软件使用监控**：实时监控并上报设备上运行的软件，支持启动/停止事件推送
 - **设备自动注册**：首次登录后自动注册设备，支持智能黑板、电子大屏等设备类型
 - **自动登录**：保存登录凭据，下次启动自动登录
 - **心跳保活**：每 30 秒发送心跳，保持设备在线状态
@@ -13,6 +14,7 @@
 - **双模式采集**：
   - 摄像头模式：调用摄像头采集画面
   - 屏幕截图模式：截取屏幕画面
+- **后台运行**：最小化到系统托盘，后台持续推送数据和监控软件
 
 ## 技术栈
 
@@ -134,6 +136,55 @@ Response: { "code": 0, "data": "http://xxx/screenshot/xxx.jpg" }
 上传频率：每 5 分钟
 ```
 
+### 6. 实时推送软件使用事件
+```
+POST /client/software/usage/realtime
+Content-Type: application/json
+Authorization: Bearer <token>
+
+Body: {
+  "deviceCode": "DEV_xxx",
+  "event": "started",
+  "session": {
+    "id": "uuid",
+    "processName": "chrome.exe",
+    "windowTitle": "Google",
+    "exePath": "C:\\Program Files\\...",
+    "startTime": 1709965845000,
+    "deptId": 362,
+    "classId": 9
+  }
+}
+Response: { "code": 0, "data": true }
+
+触发时机：软件启动或停止时实时推送
+```
+
+### 7. 批量上报软件使用记录
+```
+POST /client/software/usage/batch
+Content-Type: application/json
+Authorization: Bearer <token>
+
+Body: {
+  "deviceCode": "DEV_xxx",
+  "sessions": [
+    {
+      "id": "uuid",
+      "processName": "chrome.exe",
+      "windowTitle": "Google",
+      "exePath": "...",
+      "startTime": 1709965845000,
+      "deptId": 362,
+      "classId": 9
+    }
+  ]
+}
+Response: { "code": 0, "data": true }
+
+使用场景：启动时全量推送当前运行软件、离线后补传
+```
+
 ## 系统端接口（供参考）
 
 Web 前端/管理系统使用以下接口查看视频流：
@@ -203,20 +254,45 @@ GET /admin-api/erp/inspection/video/stream/{deviceCode}
 screenshot-client/
 ├── src/                          # React 前端源码
 │   ├── App.tsx                   # 主应用组件
+│   ├── components/               # UI 组件
+│   │   ├── Dashboard.tsx         # 仪表盘组件
+│   │   ├── DeviceInfoCard.tsx    # 设备信息卡片
+│   │   ├── SoftwareUsageList.tsx # 软件使用列表
+│   │   └── VideoPreview.tsx      # 视频预览
+│   ├── contexts/                 # React Context
 │   └── index.css                 # 样式文件
 ├── src-tauri/                    # Rust 后端源码
 │   ├── src/
-│   │   ├── lib.rs                # 核心逻辑（视频推送、心跳、注册）
-│   │   └── main.rs               # 入口文件
+│   │   ├── lib.rs                # 核心逻辑（视频推送、心跳、注册、软件监控）
+│   │   ├── database.rs           # SQLite 数据持久化
+│   │   ├── main.rs               # 入口文件
+│   │   └── monitor/              # 软件监控模块
+│   │       ├── mod.rs
+│   │       ├── process_monitor.rs    # 进程监控
+│   │       ├── session_manager.rs    # 会话管理
+│   │       ├── sync_scheduler.rs     # 同步调度
+│   │       └── windows_api.rs        # Windows API 封装
 │   ├── Cargo.toml                # Rust 依赖
 │   └── tauri.conf.json           # Tauri 配置
 ├── docs/                         # 设计文档
 │   └── api-docs/
-│       └── rust-client-video-api.md  # API 接口文档
+│       ├── rust-client-video-api.md      # 视频流 API 文档
+│       └── 软件使用数据推送接口文档.md    # 软件监控 API 文档
 └── README.md                     # 本文件
 ```
 
 ## 更新日志
+
+### 2026-03-10
+
+- **新增软件使用监控功能**
+  - 实时监听软件启动和停止事件
+  - 自动推送软件使用数据到服务端
+  - 支持启动时全量推送当前运行软件
+  - 本地 SQLite 数据库存储和断网补传
+- 修复软件推送数据结构，确保 deptId/classId 正确传递
+- 新增系统托盘后台运行模式
+- 优化设备注册流程和错误提示
 
 ### 2026-03-05
 
