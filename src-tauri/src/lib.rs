@@ -4,10 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::State;
 use tauri::Manager;
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tokio::sync::watch;
+
+mod database;
+mod monitor;
 
 // 配置结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +34,7 @@ pub struct AppConfig {
     pub device_code: String,       // 设备编码（MAC地址）
     pub device_name: String,       // 设备名称
     pub school_class_id: Option<i64>,  // 班级ID
+    pub class_name: String,          // 班级名称
     pub device_id: Option<i64>,     // 注册后返回的设备ID
     pub is_registered: bool,       // 是否已注册
     pub dept_id: Option<i64>,      // 学校/部门ID
@@ -38,6 +44,10 @@ pub struct AppConfig {
     // 后台运行配置
     pub autostart_enabled: bool,    // 开机自启开关
     pub show_window_on_start: bool, // 启动时是否显示窗口
+    // 软件监控配置
+    pub software_monitor_enabled: bool,      // 是否启用软件监控
+    pub software_monitor_interval_secs: u32, // 轮询间隔（秒）
+    pub software_monitor_batch_secs: u32,    // 批量上报间隔（秒）
 }
 
 impl Default for AppConfig {
@@ -66,6 +76,7 @@ impl Default for AppConfig {
             device_code: String::new(),
             device_name: String::new(),
             school_class_id: None,
+            class_name: String::new(),
             device_id: None,
             is_registered: false,
             dept_id: None,
@@ -74,7 +85,11 @@ impl Default for AppConfig {
             refresh_token: None,
             // 后台运行默认值
             autostart_enabled: true,
-            show_window_on_start: false,
+            show_window_on_start: true,
+            // 软件监控默认值
+            software_monitor_enabled: true,
+            software_monitor_interval_secs: 5,
+            software_monitor_batch_secs: 300,
         }
     }
 }
@@ -82,6 +97,7 @@ impl Default for AppConfig {
 pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub is_running: Mutex<bool>,
+    pub monitor_shutdown: Mutex<Option<watch::Sender<bool>>>,
 }
 
 fn get_config_path() -> PathBuf {
@@ -98,13 +114,28 @@ fn get_config_path() -> PathBuf {
 
 fn load_config() -> AppConfig {
     let path = get_config_path();
+    println!("[load_config] 配置文件路径: {:?}", path);
+    println!("[load_config] 文件是否存在: {}", path.exists());
     if path.exists() {
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(config) = serde_json::from_str(&content) {
-                return config;
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                println!("[load_config] 文件读取成功, 长度: {}", content.len());
+                match serde_json::from_str::<AppConfig>(&content) {
+                    Ok(config) => {
+                        println!("[load_config] JSON解析成功");
+                        return config;
+                    }
+                    Err(e) => {
+                        println!("[load_config] JSON解析失败: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("[load_config] 文件读取失败: {}", e);
             }
         }
     }
+    println!("[load_config] 使用默认配置");
     AppConfig::default()
 }
 
@@ -117,29 +148,34 @@ fn save_config(config: &AppConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn capture_screen() -> Result<String, String> {
+async fn capture_screen() -> Result<String, String> {
     use screenshots::image::ImageOutputFormat;
 
-    let screens = screenshots::Screen::all().map_err(|e| e.to_string())?;
+    // 在独立线程中执行截图，避免阻塞主线程
+    let result = tokio::task::spawn_blocking(move || {
+        let screens = screenshots::Screen::all().map_err(|e| e.to_string())?;
 
-    if screens.is_empty() {
-        return Err("没有找到显示器".to_string());
-    }
+        if screens.is_empty() {
+            return Err("没有找到显示器".to_string());
+        }
 
-    let screen = &screens[0];
-    let capture = screen.capture().map_err(|e| e.to_string())?;
+        let screen = &screens[0];
+        let capture = screen.capture().map_err(|e| e.to_string())?;
 
-    let mut buffer = Cursor::new(Vec::new());
-    capture
-        .write_to(&mut buffer, ImageOutputFormat::Png)
-        .map_err(|e| e.to_string())?;
+        let mut buffer = Cursor::new(Vec::new());
+        capture
+            .write_to(&mut buffer, ImageOutputFormat::Png)
+            .map_err(|e| e.to_string())?;
 
-    let base64_data = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        buffer.into_inner(),
-    );
+        let base64_data = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            buffer.into_inner(),
+        );
 
-    Ok(format!("data:image/png;base64,{}", base64_data))
+        Ok(format!("data:image/png;base64,{}", base64_data))
+    }).await;
+
+    result.map_err(|e| format!("截图任务执行失败: {}", e))?
 }
 
 #[tauri::command]
@@ -630,10 +666,11 @@ async fn register_device(
     device_name: String,
     school_class_id: i64,
     device_type: Option<i32>,
+    class_name: String,  // 新增：班级名称
     state: State<'_, AppState>,
 ) -> Result<RegisterData, String> {
     println!("[register_device] 开始设备注册...");
-    println!("[register_device] 设备名称: {}, 班级ID: {}", device_name, school_class_id);
+    println!("[register_device] 设备名称: {}, 班级ID: {}, 班级名称: {}", device_name, school_class_id, class_name);
 
     // 使用作用域限制锁的生命周期，避免死锁
     let (token, device_code, dept_id, api_url) = {
@@ -730,10 +767,12 @@ async fn register_device(
                 let mut config = state.config.lock().map_err(|e| e.to_string())?;
                 config.device_name = data.device_name.clone();
                 config.school_class_id = Some(school_class_id);
+                // 使用传入的班级名称，如果后端返回了班级名称则优先使用
+                config.class_name = data.classroom_name.clone().unwrap_or_else(|| class_name.clone());
                 config.device_id = Some(data.id);
                 config.is_registered = true;
                 save_config(&config)?;
-                println!("[register_device] 注册信息保存成功");
+                println!("[register_device] 注册信息保存成功, 班级: {}", config.class_name);
 
                 Ok(data)
             } else {
@@ -742,6 +781,7 @@ async fn register_device(
                 let mut config = state.config.lock().map_err(|e| e.to_string())?;
                 config.device_name = device_name.clone();
                 config.school_class_id = Some(school_class_id);
+                config.class_name = class_name.clone();  // 保存班级名称
                 config.is_registered = true;
                 save_config(&config)?;
 
@@ -881,19 +921,22 @@ async fn upload_screenshot_v2(
         return Err("设备未注册".to_string());
     }
 
-    // 解析 Base64 图片数据
+    // 解析 Base64 图片数据（支持 PNG 和 JPEG 格式）
     let base64_data = image_data
         .strip_prefix("data:image/png;base64,")
+        .or_else(|| image_data.strip_prefix("data:image/jpeg;base64,"))
         .unwrap_or(&image_data);
 
     let image_bytes = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
         base64_data,
-    ).map_err(|e| e.to_string())?;
+    ).map_err(|e| format!("Base64解码失败: {}", e))?;
 
     // 加载图片
     let img = image::load_from_memory(&image_bytes)
         .map_err(|e| format!("加载图片失败: {}", e))?;
+
+    println!("[VideoPush] 原始图片: {}x{} bytes, 设备: {}", img.width(), img.height(), device_code);
 
     // 调整分辨率（最大1280x720）
     let resized_img = resize_image_for_stream(&img);
@@ -926,16 +969,24 @@ async fn upload_screenshot_v2(
         .await
         .map_err(|e| e.to_string())?;
 
-    if response.status().is_success() {
-        let result: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    println!("[VideoPush] API响应: status={}, body={}", status, body);
+
+    if status.is_success() {
+        let result: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
         let code = result.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
         if code == 0 || code == 200 {
+            println!("[VideoPush] 推流成功");
             Ok(true)
         } else {
-            Err(result.get("msg").and_then(|m| m.as_str()).unwrap_or("上传失败").to_string())
+            let msg = result.get("msg").and_then(|m| m.as_str()).unwrap_or("上传失败").to_string();
+            println!("[VideoPush] 推流失败: {}", msg);
+            Err(msg)
         }
     } else {
-        Err(format!("上传失败: {}", response.status()))
+        println!("[VideoPush] HTTP错误: {}", status);
+        Err(format!("上传失败: {}", status))
     }
 }
 
@@ -1072,6 +1123,7 @@ pub fn run() {
         .manage(AppState {
             config: Mutex::new(config),
             is_running: Mutex::new(false),
+            monitor_shutdown: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             capture_screen,
@@ -1095,24 +1147,41 @@ pub fn run() {
             upload_screenshot_file,
             toggle_window,
             exit_app,
+            start_software_monitor,
+            stop_software_monitor,
+            get_software_monitor_stats,
+            get_software_usages,
+            push_all_running_software,
         ])
         .setup(move |app| {
+            println!("[setup] ========== setup 钩子开始执行 ==========");
+
             // 获取命令行参数
             let args: Vec<String> = std::env::args().collect();
             let from_autostart = is_autostart(&args);
+            println!("[setup] 启动参数: {:?}, 是否自启: {}", args, from_autostart);
 
             // 创建系统托盘
-            let tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("截图客户端")
-                .show_menu_on_left_click(false)
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { .. } = event {
-                        let app = tray.app_handle();
-                        toggle_window_visibility(app);
-                    }
-                })
-                .build(app)?;
+            println!("[setup] 创建系统托盘...");
+            if let Some(icon) = app.default_window_icon() {
+                match TrayIconBuilder::new()
+                    .icon(icon.clone())
+                    .tooltip("截图客户端")
+                    .show_menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click { .. } = event {
+                            let app = tray.app_handle();
+                            toggle_window_visibility(app);
+                        }
+                    })
+                    .build(app)
+                {
+                    Ok(_) => println!("[setup] 托盘创建成功"),
+                    Err(e) => println!("[setup] 托盘创建失败（非致命）: {}", e),
+                }
+            } else {
+                println!("[setup] 警告: 无法获取默认窗口图标，跳过托盘创建");
+            }
 
             // 设置全局快捷键 Ctrl+Shift+S（暂时禁用，避免热键冲突）
             // #[cfg(desktop)]
@@ -1143,6 +1212,17 @@ pub fn run() {
             println!("setup: 开始设置窗口");
             if let Some(window) = app.get_webview_window("main") {
                 println!("setup: 获取到主窗口");
+
+                // 启用开发者工具快捷键 (F12)
+                #[cfg(debug_assertions)]
+                {
+                    window.open_devtools();
+                }
+
+                // 确保窗口可以调整大小
+                let _ = window.set_resizable(true);
+                let _ = window.set_min_size(Some(tauri::LogicalSize::new(600.0, 400.0)));
+
                 let window_clone = window.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1162,11 +1242,24 @@ pub fn run() {
                     let focus_result = window.set_focus();
                     println!("setup: show_result = {:?}, focus_result = {:?}", show_result, focus_result);
                 } else {
-                    println!("已登录且已注册，最小化到托盘");
-                    let _ = window.hide();
+                    println!("已登录且已注册，显示窗口");
+                    // 临时显示窗口用于预览
+                    let _ = window.show();
+                    let _ = window.set_focus();
                 }
             } else {
                 println!("setup: 未能获取主窗口");
+            }
+
+            // 启动软件监控服务（如果已登录且已注册且配置启用）
+            if !need_show_window {
+                println!("启动软件监控服务...");
+                let app_handle = app.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = init_software_monitor(app_handle).await {
+                        log::error!("启动软件监控失败: {}", e);
+                    }
+                });
             }
 
             Ok(())
@@ -1195,6 +1288,492 @@ fn toggle_window(app: tauri::AppHandle) {
 
 // 命令：完全退出应用
 #[tauri::command]
-fn exit_app(app: tauri::AppHandle) {
+async fn exit_app(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // 停止软件监控服务
+    stop_software_monitor_internal(&state).await;
     app.exit(0);
+    Ok(())
+}
+
+// ========== 软件监控相关命令 ==========
+
+use crate::monitor::{
+    run_background_sync, MonitorConfig, MonitorEvent, ProcessMonitor, SessionManager,
+    SyncConfig, SyncScheduler,
+};
+
+/// 初始化软件监控服务
+async fn init_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+
+    // 获取配置
+    let (enabled, device_id, api_url, device_code, token, interval_secs, batch_secs) = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+        (
+            config.software_monitor_enabled,
+            config.device_id.unwrap_or(0),
+            config.api_url.clone(),
+            config.device_code.clone(),
+            config.access_token.clone().unwrap_or_default(),
+            config.software_monitor_interval_secs,
+            config.software_monitor_batch_secs,
+        )
+    };
+
+    if !enabled {
+        log::info!("软件监控已禁用");
+        return Ok(());
+    }
+
+    if device_id == 0 {
+        log::warn!("设备ID未设置，无法启动软件监控");
+        return Ok(());
+    }
+
+    // 创建会话管理器
+    let mut session_manager = SessionManager::new(device_id)?;
+    let db = session_manager.get_db();
+
+    // 创建同步调度器
+    let sync_config = SyncConfig {
+        api_url,
+        device_code,
+        token,
+        batch_interval: Duration::from_secs(batch_secs as u64),
+        ..Default::default()
+    };
+    let sync_scheduler = SyncScheduler::new(sync_config, db.clone())?;
+
+    // 创建关闭信号
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    {
+        let mut shutdown_guard = state.monitor_shutdown.lock().map_err(|e| e.to_string())?;
+        *shutdown_guard = Some(shutdown_tx);
+    }
+
+    // 启动后台同步任务
+    tokio::spawn(run_background_sync(sync_scheduler, shutdown_rx));
+
+    // 启动监控循环
+    let monitor_config = MonitorConfig {
+        check_interval: Duration::from_secs(interval_secs as u64),
+        device_id,
+        ..Default::default()
+    };
+    let mut monitor = ProcessMonitor::new(monitor_config);
+
+    log::info!("软件监控服务已启动");
+
+    // 启动时立即推送一次全量软件列表
+    println!("[init_software_monitor] 启动时推送全量软件列表...");
+    if let Err(e) = push_all_running_software(state.clone().into()).await {
+        log::error!("启动时全量推送失败: {}", e);
+    }
+
+    // 监控循环
+    loop {
+        // 检查关闭信号
+        {
+            let shutdown_guard = state.monitor_shutdown.lock().map_err(|e| e.to_string())?;
+            if shutdown_guard.is_none() {
+                log::info!("收到关闭信号，停止软件监控");
+                break;
+            }
+        }
+
+        // 执行一次轮询
+        let events = monitor.tick();
+
+        for event in events {
+            match &event {
+                MonitorEvent::SessionStarted(session) => {
+                    log::debug!("软件启动: {} - {}", session.process_name, session.window_title);
+                    // 新软件打开时，实时推送 started 事件
+                    println!("[monitor] 新软件启动，实时推送: {}", session.process_name);
+                    if let Err(e) = push_software_realtime(&state, "started", session).await {
+                        log::error!("实时推送软件启动失败: {}", e);
+                    }
+                }
+                MonitorEvent::SessionEnded(session) => {
+                    log::debug!("软件关闭: {}，使用时长: {}秒", session.process_name, session.duration_secs);
+                    // 软件关闭时，实时推送 stopped 事件
+                    println!("[monitor] 软件关闭，实时推送: {}", session.process_name);
+                    if let Err(e) = push_software_realtime(&state, "stopped", session).await {
+                        log::error!("实时推送软件关闭失败: {}", e);
+                    }
+                }
+                _ => {}
+            }
+
+            // 处理事件
+            if let Err(e) = session_manager.handle_event(&event) {
+                log::error!("处理监控事件失败: {}", e);
+            }
+        }
+
+        // 等待下一次轮询
+        tokio::time::sleep(Duration::from_secs(interval_secs as u64)).await;
+    }
+
+    // 关闭当前活跃会话
+    if let Some(session) = session_manager.close_active_session()? {
+        log::info!("关闭活跃会话: {}", session.process_name);
+    }
+
+    Ok(())
+}
+
+/// 停止软件监控服务
+async fn stop_software_monitor_internal(state: &AppState) {
+    let mut shutdown_guard = state.monitor_shutdown.lock().unwrap();
+    if let Some(tx) = shutdown_guard.take() {
+        let _ = tx.send(true);
+        log::info!("已发送软件监控关闭信号");
+    }
+}
+
+/// 命令：启动软件监控
+#[tauri::command]
+async fn start_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
+    init_software_monitor(app).await
+}
+
+/// 命令：停止软件监控
+#[tauri::command]
+async fn stop_software_monitor(state: State<'_, AppState>) -> Result<(), String> {
+    stop_software_monitor_internal(&state).await;
+    Ok(())
+}
+
+/// 命令：获取软件监控统计信息
+#[tauri::command]
+fn get_software_monitor_stats(state: State<AppState>) -> Result<serde_json::Value, String> {
+    use crate::database::Database;
+
+    let device_id = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+        config.device_id.unwrap_or(0)
+    };
+
+    let db = Database::new()?;
+    let (total, pending) = db.get_stats()?;
+
+    Ok(serde_json::json!({
+        "total_sessions": total,
+        "pending_sync": pending,
+        "device_id": device_id,
+    }))
+}
+
+/// 软件使用信息结构体
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SoftwareUsage {
+    id: String,
+    process_name: String,
+    window_title: String,
+    is_active: bool,
+    duration_secs: u32,
+    last_active_time: String,
+}
+
+/// 命令：获取当前运行的软件列表（在独立线程执行避免阻塞UI）
+#[tauri::command]
+async fn get_software_usages() -> Result<Vec<SoftwareUsage>, String> {
+    use crate::monitor::windows_api::{enumerate_user_processes, get_foreground_process};
+    use std::sync::mpsc;
+
+    println!("[get_software_usages] 开始执行...");
+
+    // 在独立线程执行进程枚举
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let processes = enumerate_user_processes();
+
+        let foreground = get_foreground_process();
+        let foreground_pid = foreground.as_ref().map(|p| p.pid);
+
+        // 限制返回数量，优先保留前台进程和常用软件
+        let max_count = 30;
+        let usages: Vec<SoftwareUsage> = processes
+            .into_iter()
+            .take(max_count)
+            .map(|p| {
+                let is_active = Some(p.pid) == foreground_pid;
+                SoftwareUsage {
+                    id: p.pid.to_string(),
+                    process_name: p.name.clone(),
+                    window_title: p.window_title.clone(),
+                    is_active,
+                    duration_secs: 0,
+                    last_active_time: chrono::Local::now().to_rfc3339(),
+                }
+            })
+            .collect();
+
+        println!("[get_software_usages] 返回 {} 个软件", usages.len());
+        let _ = tx.send(usages);
+    });
+
+    let usages = rx.recv().map_err(|e| e.to_string())?;
+    Ok(usages)
+}
+
+/// 全量推送当前运行软件列表到服务器
+#[tauri::command]
+async fn push_all_running_software(state: State<'_, AppState>) -> Result<(), String> {
+    use crate::monitor::windows_api::{enumerate_user_processes, get_foreground_process};
+    use std::sync::mpsc;
+
+    println!("[push_all_running_software] 开始全量推送...");
+
+    // 获取配置
+    let (api_url, device_code, token, school_class_id, dept_id) = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+
+        // 验证关键字段
+        let dept_id = config.dept_id.ok_or("部门ID未配置，请先完成设备注册")?;
+        let school_class_id = config.school_class_id.ok_or("班级ID未配置，请先完成设备注册")?;
+
+        (
+            config.api_url.clone(),
+            config.device_code.clone(),
+            config.access_token.clone().unwrap_or_default(),
+            school_class_id,
+            dept_id,
+        )
+    };
+
+    if token.is_empty() {
+        return Err("未登录，无法推送软件信息".to_string());
+    }
+
+    // 验证 ID 有效性（避免使用 0 值）
+    if dept_id == 0 || school_class_id == 0 {
+        return Err(format!("部门ID({})或班级ID({})无效，请重新登录并完成设备注册", dept_id, school_class_id));
+    }
+
+    // 在独立线程执行进程枚举
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let processes = enumerate_user_processes();
+        let foreground = get_foreground_process();
+        let foreground_pid = foreground.as_ref().map(|p| p.pid);
+
+        // 限制返回数量
+        let max_count = 50;
+        let usages: Vec<SoftwareUsage> = processes
+            .into_iter()
+            .take(max_count)
+            .map(|p| {
+                let is_active = Some(p.pid) == foreground_pid;
+                SoftwareUsage {
+                    id: p.pid.to_string(),
+                    process_name: p.name.clone(),
+                    window_title: p.window_title.clone(),
+                    is_active,
+                    duration_secs: 0,
+                    last_active_time: chrono::Local::now().to_rfc3339(),
+                }
+            })
+            .collect();
+
+        let _ = tx.send(usages);
+    });
+
+    let usages = rx.recv().map_err(|e| e.to_string())?;
+    println!("[push_all_running_software] 获取到 {} 个软件", usages.len());
+
+    if usages.is_empty() {
+        println!("[push_all_running_software] 没有运行中的软件，跳过推送");
+        return Ok(());
+    }
+
+    // 构建请求体 - 严格按照API文档格式
+    #[derive(Debug, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BatchSoftwareRequest {
+        device_code: String,
+        sessions: Vec<SoftwareSessionPayload>,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SoftwareSessionPayload {
+        id: String,
+        process_name: String,
+        window_title: String,
+        exe_path: String,
+        start_time: i64,
+        end_time: Option<i64>,
+        duration_secs: i64,
+        device_id: i64,
+        dept_id: i64,
+        class_id: i64,
+    }
+
+    let request = BatchSoftwareRequest {
+        device_code: device_code.clone(),
+        sessions: usages
+            .into_iter()
+            .map(|u| SoftwareSessionPayload {
+                id: u.id.clone(),
+                process_name: u.process_name,
+                window_title: u.window_title,
+                exe_path: String::new(), // 全量推送时可能没有exe_path
+                start_time: chrono::Local::now().timestamp_millis(),
+                end_time: None,
+                duration_secs: 0,
+                device_id: 0,
+                dept_id,
+                class_id: school_class_id,
+            })
+            .collect(),
+    };
+
+    // 打印调试信息
+    let request_json = serde_json::to_string_pretty(&request).unwrap_or_default();
+    println!("[push_all_running_software] 批量推送请求体:\n{}", request_json);
+
+    // 发送全量推送请求
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .no_proxy()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .post(&format!("{}/client/software/usage/batch", api_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {}", e))?;
+
+    if response.status().is_success() {
+        let result: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        let code = result.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+        if code == 0 || code == 200 {
+            println!("[push_all_running_software] 全量推送成功");
+            Ok(())
+        } else {
+            let msg = result.get("msg").and_then(|m| m.as_str()).unwrap_or("推送失败");
+            Err(format!("服务器返回错误: {}", msg))
+        }
+    } else {
+        Err(format!("HTTP错误: {}", response.status()))
+    }
+}
+
+/// 推送单个软件使用信息到服务器 - 严格按照API文档格式
+async fn push_software_realtime(
+    state: &AppState,
+    event_type: &str, // "started" 或 "stopped"
+    session: &crate::database::SoftwareSession,
+) -> Result<(), String> {
+    let (api_url, device_code, token, school_class_id, dept_id) = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+
+        // 验证关键字段
+        let dept_id = config.dept_id.ok_or("部门ID未配置，请先完成设备注册")?;
+        let school_class_id = config.school_class_id.ok_or("班级ID未配置，请先完成设备注册")?;
+
+        (
+            config.api_url.clone(),
+            config.device_code.clone(),
+            config.access_token.clone().unwrap_or_default(),
+            school_class_id,
+            dept_id,
+        )
+    };
+
+    if token.is_empty() {
+        return Err("未登录".to_string());
+    }
+
+    // 验证 ID 有效性（避免使用 0 值）
+    if dept_id == 0 || school_class_id == 0 {
+        return Err(format!("部门ID({})或班级ID({})无效，请重新登录并完成设备注册", dept_id, school_class_id));
+    }
+
+    // 严格按照API文档构建请求体
+    // API文档要求: deviceCode, event, session
+    #[derive(Debug, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RealtimeRequest {
+        device_code: String,
+        event: String,
+        session: SessionPayload,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SessionPayload {
+        id: String,
+        process_name: String,
+        window_title: String,
+        exe_path: String,
+        start_time: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        end_time: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_secs: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        device_id: Option<i64>,
+        dept_id: i64,
+        class_id: i64,
+    }
+
+    let session_payload = SessionPayload {
+        id: session.id.clone(),
+        process_name: session.process_name.clone(),
+        window_title: session.window_title.clone(),
+        exe_path: session.exe_path.clone(),
+        start_time: session.start_time,
+        end_time: session.end_time,
+        duration_secs: if event_type == "stopped" { Some(session.duration_secs) } else { None },
+        device_id: Some(session.device_id),
+        dept_id,
+        class_id: school_class_id,
+    };
+
+    let request = RealtimeRequest {
+        device_code,
+        event: event_type.to_string(),
+        session: session_payload,
+    };
+
+    // 打印调试信息
+    let request_json = serde_json::to_string_pretty(&request).unwrap_or_default();
+    println!("[push_software_realtime] 实时推送请求体:\n{}", request_json);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .no_proxy()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    println!("[push_software_realtime] 推送 {} 事件: {}", event_type, session.process_name);
+
+    let response = client
+        .post(&format!("{}/client/software/usage/realtime", api_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {}", e))?;
+
+    if response.status().is_success() {
+        let result: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        let code = result.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+        if code == 0 || code == 200 {
+            println!("[push_software_realtime] 推送成功: {}", session.process_name);
+            Ok(())
+        } else {
+            let msg = result.get("msg").and_then(|m| m.as_str()).unwrap_or("推送失败");
+            Err(format!("服务器返回错误: {}", msg))
+        }
+    } else {
+        Err(format!("HTTP错误: {}", response.status()))
+    }
 }

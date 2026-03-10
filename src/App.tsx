@@ -1,13 +1,8 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { DeviceSetupWrapper } from "./DeviceSetupWrapper";
-
-// 设备类型名称
-const deviceTypeMap: Record<number, string> = {
-  1: '智能黑板',
-  2: '智能多媒体设备',
-  3: '其他'
-};
+import { ThemeProvider } from "./contexts/ThemeContext";
+import { Dashboard } from "./components/Dashboard";
 
 
 
@@ -30,6 +25,7 @@ const MOCK_CONFIG = {
   device_code: "",
   device_name: "",
   school_class_id: null,
+  class_name: "",
   device_id: null,
   is_registered: false,
   dept_id: null,
@@ -59,6 +55,7 @@ interface AppConfig {
   device_code: string;
   device_name: string;
   school_class_id: number | null;
+  class_name: string;
   device_id: number | null;
   is_registered: boolean;
   dept_id: number | null;
@@ -88,7 +85,7 @@ function App() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
-  const [isOnline, setIsOnline] = useState(true);
+  const [isOnline] = useState(true);
   const [statusMessage, setStatusMessage] = useState("");
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
@@ -100,20 +97,20 @@ function App() {
   const [showDeviceSetup, setShowDeviceSetup] = useState(false);
   const [classList, setClassList] = useState<Array<{ id: number; class_name: string }>>([]);
 
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const timerRef = useRef<number | null>(null);
-  const heartbeatTimerRef = useRef<number | null>(null);
-  const screenshotTimerRef = useRef<number | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const currentImageRef = useRef<string | null>(null);
-
   // 分辨率映射
   const resolutionMap: Record<string, { width: number; height: number }> = {
     "480p": { width: 640, height: 360 },
     "720p": { width: 1280, height: 720 },
     "1080p": { width: 1920, height: 1080 },
   };
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const timerRef = useRef<number | null>(null);
+  const screenshotTimerRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const currentImageRef = useRef<string | null>(null);
+  const isCapturingRef = useRef<boolean>(false); // 防止同时多次截图
 
   // 初始化：加载配置（只在组件挂载时执行一次）
   useEffect(() => {
@@ -146,7 +143,7 @@ function App() {
       try {
         setStatusMessage("正在自动登录...");
         
-        const loginResult = await invoke<{
+        await invoke<{
           user_id: number;
           username: string;
           dept_id: number;
@@ -158,6 +155,12 @@ function App() {
 
         console.log("自动登录成功");
         setIsLoggedIn(true);
+
+        // 登录成功后立即推送一次当前运行软件列表
+        console.log("[App] 登录成功，推送当前运行软件列表...");
+        invoke("push_all_running_software")
+          .then(() => console.log("[App] 软件列表推送成功"))
+          .catch((e) => console.error("[App] 软件列表推送失败:", e));
 
         // 检查是否已注册设备
         if (config.is_registered) {
@@ -195,15 +198,6 @@ function App() {
   //     }
   //   };
   // }, [isLoggedIn, config?.is_registered, showDeviceSetup]);
-
-  // 发送心跳
-  const sendHeartbeat = async () => {
-    try {
-      await invoke("send_heartbeat");
-    } catch (e) {
-      console.error("心跳失败:", e);
-    }
-  };
 
   // 检测摄像头
   // 检测摄像头是否可用（包括权限检查）
@@ -258,12 +252,14 @@ function App() {
   useEffect(() => {
     if (showDeviceSetup) return; // 设备设置页面不启动截图
     if (!config || isInitialized || !isLoggedIn) return;
-    
+
     // 延迟启动截图，给注册流程足够时间完成
     const timer = setTimeout(() => {
       setIsInitialized(true);
       selectCaptureMode().then((mode) => {
+        // 同步更新 state 和 ref
         setActualCaptureMode(mode);
+        captureModeRef.current = mode;
         setStatusMessage(`使用${mode === "camera" ? "摄像头" : "屏幕截图"}模式`);
         if (mode === "camera") {
           initCamera().then(() => {
@@ -271,6 +267,7 @@ function App() {
               startCaptureLoop();
             } else {
               setActualCaptureMode("screen");
+              captureModeRef.current = "screen";
               startCaptureLoop();
             }
           });
@@ -279,7 +276,7 @@ function App() {
         }
       });
     }, 500); // 500ms 延迟，确保注册流程完成
-    
+
     return () => clearTimeout(timer);
   }, [config, isLoggedIn, showDeviceSetup]);
 
@@ -298,11 +295,17 @@ function App() {
     console.log("[handleDeviceRegisterInternal] 开始注册:", { classId, deviceType, deviceName });
 
     try {
+      // 查找班级名称
+      const selectedClass = classList.find(c => c.id === classId);
+      const className = selectedClass?.class_name || "";
+      console.log("[handleDeviceRegisterInternal] 班级名称:", className);
+
       // 直接调用注册
       await invoke("register_device", {
         deviceName: deviceName,
         schoolClassId: classId,
-        deviceType: deviceType
+        deviceType: deviceType,
+        className: className
       });
 
       console.log("[handleDeviceRegisterInternal] 注册成功");
@@ -321,16 +324,6 @@ function App() {
     }
   };
 
-  const checkNetwork = async () => {
-    if (!config) return;
-    try {
-      const online = await invoke<boolean>("check_network", { apiUrl: config.api_url });
-      setIsOnline(online);
-    } catch {
-      setIsOnline(false);
-    }
-  };
-
   // 初始化摄像头
   const initCamera = async () => {
     try {
@@ -344,8 +337,10 @@ function App() {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: width },
-          height: { ideal: height }
-        }
+          height: { ideal: height },
+          facingMode: 'user'
+        },
+        audio: false
       });
 
       // 停止之前的流
@@ -355,8 +350,17 @@ function App() {
 
       streamRef.current = stream;
 
+      // 设置 video 元素的 srcObject
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        // 等待视频准备好
+        await new Promise<void>((resolve, reject) => {
+          if (!videoRef.current) return reject(new Error("Video element not found"));
+          videoRef.current.onloadedmetadata = () => resolve();
+          videoRef.current.onerror = () => reject(new Error("Video load error"));
+          // 5秒超时
+          setTimeout(() => reject(new Error("Video init timeout")), 5000);
+        });
         await videoRef.current.play();
       }
 
@@ -378,14 +382,40 @@ function App() {
   };
 
   // 启动采集循环
-  const startCaptureLoop = () => {
+  const startCaptureLoop = async () => {
+    // 如果是摄像头模式，先等待摄像头准备好
+    if (captureModeRef.current === "camera") {
+      // 最多等待5秒
+      let attempts = 0;
+      const maxAttempts = 50; // 5秒 (50 * 100ms)
+
+      while ((!videoRef.current || videoRef.current?.videoWidth === 0) && attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        attempts++;
+      }
+
+      if (attempts >= maxAttempts) {
+        console.warn("Camera initialization timeout, switching to screen mode");
+        setActualCaptureMode("screen");
+        captureModeRef.current = "screen";
+        setCameraError("摄像头初始化超时");
+      } else {
+        console.log("Camera ready after", attempts * 100, "ms");
+      }
+    }
+
+    // 根据模式设置不同的捕获间隔
+    // 摄像头模式：500ms (2fps)
+    // 截图模式：1000ms (1fps) - 降低频率避免卡顿
+    const captureInterval = captureModeRef.current === "camera" ? 500 : 1000;
+
     // 立即执行一次
     captureAndPushFrame();
 
-    // 视频推送：每500ms（2帧/秒）
+    // 视频推送定时器
     timerRef.current = window.setInterval(() => {
       captureAndPushFrame();
-    }, 500);
+    }, captureInterval);
 
     // 截图上传：每5分钟上传一次（用于后台查看静态画面）
     uploadScreenshotFile();
@@ -395,32 +425,54 @@ function App() {
   };
 
   // 捕获帧并推送到视频流（每500ms调用一次，2帧/秒）
+  const captureFrameCount = useRef(0);
+  const pushSuccessCount = useRef(0);
+  const pushFailCount = useRef(0);
+  const captureModeRef = useRef(actualCaptureMode);
+
+  // 同步 actualCaptureMode 到 ref
+  useEffect(() => {
+    captureModeRef.current = actualCaptureMode;
+    console.log('[App] Capture mode changed to:', actualCaptureMode);
+  }, [actualCaptureMode]);
+
   const captureAndPushFrame = async () => {
     if (!config) return;
 
-    // 使用实际选择的采集模式
-    const captureMode = actualCaptureMode;
+    captureFrameCount.current++;
+    const captureMode = captureModeRef.current;
 
-    // 摄像头模式
-    if (captureMode === "camera" && hasCamera && !cameraError && videoRef.current && canvasRef.current) {
+    // 每30秒输出一次调试信息
+    if (captureFrameCount.current % 60 === 0) {
+      console.log(`[VideoPush] mode=${captureModeRef.current}, frames=${captureFrameCount.current}, success=${pushSuccessCount.current}, fail=${pushFailCount.current}`);
+    }
+
+    // 摄像头模式 - 只有当明确是摄像头模式且 video 就绪时才使用摄像头
+    if (captureMode === "camera" && hasCamera && !cameraError) {
+      if (!videoRef.current || !canvasRef.current) {
+        return;
+      }
+
+      const video = videoRef.current;
+
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        return;
+      }
+
       try {
-        const video = videoRef.current;
         const canvas = canvasRef.current;
 
-        // 设置 canvas 尺寸与视频一致
         if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-          canvas.width = video.videoWidth || 640;
-          canvas.height = video.videoHeight || 480;
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
         }
 
-        // 绘制当前帧
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-        // 转为 base64
-        const imageData = canvas.toDataURL('image/png');
+        const imageData = canvas.toDataURL('image/jpeg', 0.7);
         setCurrentImage(imageData);
         currentImageRef.current = imageData;
 
@@ -431,19 +483,36 @@ function App() {
           lastCaptureTime: timeStr
         }));
 
-        // 推送到视频流（不等待响应，避免阻塞）
+        // 推送到视频流
         if (isLoggedIn && config.is_registered && isOnline) {
-          invoke("upload_screenshot_v2", { imageData }).catch(e => {
-            console.error("Video push failed:", e);
-          });
+          invoke("upload_screenshot_v2", { imageData })
+            .then(() => { pushSuccessCount.current++; })
+            .catch(e => {
+              pushFailCount.current++;
+              if (captureFrameCount.current % 10 === 0) {
+                console.error("[VideoPush] Failed:", e);
+              }
+            });
         }
       } catch (e) {
-        console.error("Capture failed:", e);
+        console.error("[VideoPush] Camera capture failed:", e);
       }
-    } else {
-      // 截图模式（调用后端截屏）
+    } else if (captureMode === "screen") {
+      console.log("[VideoPush] Entering screen capture mode");
+      // 防止同时多次截图
+      if (isCapturingRef.current) {
+        console.log("[VideoPush] Screen capture already in progress, skipping frame");
+        return;
+      }
+
+      isCapturingRef.current = true;
+
       try {
+        console.log("[VideoPush] Starting screen capture...");
         const imageData = await invoke<string>("capture_screen");
+        console.log("[VideoPush] Screen captured successfully, size:", imageData?.length);
+        console.log("[VideoPush] Image data prefix:", imageData?.substring(0, 50));
+
         setCurrentImage(imageData);
         currentImageRef.current = imageData;
 
@@ -454,14 +523,21 @@ function App() {
           lastCaptureTime: timeStr
         }));
 
-        // 推送到视频流（不等待响应，避免阻塞）
         if (isLoggedIn && config.is_registered && isOnline) {
-          invoke("upload_screenshot_v2", { imageData }).catch(e => {
-            console.error("Video push failed:", e);
-          });
+          invoke("upload_screenshot_v2", { imageData })
+            .then(() => {
+              pushSuccessCount.current++;
+              console.log("[VideoPush] Screen frame pushed successfully");
+            })
+            .catch(e => {
+              pushFailCount.current++;
+              console.error("[VideoPush] Failed:", e);
+            });
         }
       } catch (e) {
-        console.error("Screen capture failed:", e);
+        console.error("[VideoPush] Screen capture failed:", e);
+      } finally {
+        isCapturingRef.current = false;
       }
     }
   };
@@ -583,6 +659,14 @@ function App() {
   const switchCaptureMode = async (mode: string) => {
     if (!config) return;
 
+    console.log('[App] Switching capture mode to:', mode);
+
+    // 先更新 ref，确保 captureAndPushFrame 立即使用新模式
+    captureModeRef.current = mode as "camera" | "screen";
+
+    // 更新实际采集模式
+    setActualCaptureMode(mode as "camera" | "screen");
+
     const newConfig = { ...config, capture_mode: mode };
     setConfig(newConfig);
 
@@ -596,10 +680,12 @@ function App() {
     if (timerRef.current) {
       clearInterval(timerRef.current);
     }
+    // 根据模式设置不同的捕获间隔
+    const captureInterval = mode === "camera" ? 500 : 1000;
     captureFrame();
     timerRef.current = window.setInterval(() => {
       captureFrame();
-    }, config.interval * 1000);
+    }, captureInterval);
 
     // 根据模式初始化或停止摄像头
     if (mode === "camera" && hasCamera) {
@@ -609,9 +695,32 @@ function App() {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
       }
+      // 重置截图锁
+      isCapturingRef.current = false;
     }
 
     setStatusMessage(mode === "camera" ? "已切换到摄像头模式" : "已切换到截图模式");
+  };
+
+  // 切换分辨率
+  const handleResolutionChange = async (resolution: string) => {
+    if (!config) return;
+
+    const newConfig = { ...config, camera_resolution: resolution };
+    setConfig(newConfig);
+
+    try {
+      await invoke("update_config", { newConfig });
+      setStatusMessage(`分辨率已切换到 ${resolution}`);
+
+      // 如果是摄像头模式，重新初始化摄像头
+      if (actualCaptureMode === "camera" && hasCamera) {
+        await initCamera();
+      }
+    } catch (e) {
+      console.error("Save resolution failed:", e);
+      setStatusMessage(`切换分辨率失败: ${e}`);
+    }
   };
 
   // 组件卸载时清理摄像头
@@ -717,264 +826,26 @@ function App() {
   }
 
   return (
-    <div className="app" style={{ padding: 0, background: '#0a0a0f', height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      {/* 隐藏的 canvas 用于捕获帧 */}
+    <ThemeProvider>
+      {/* 隐藏的 video 和 canvas 用于捕获帧 */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        style={{ display: 'none' }}
+      />
       <canvas ref={canvasRef} style={{ display: 'none' }} />
-
-      {/* 顶部状态栏 - 简洁信息条 */}
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        padding: '12px 24px',
-        background: 'linear-gradient(90deg, #1a1a2e 0%, #16213e 100%)',
-        borderBottom: '1px solid rgba(255,255,255,0.1)',
-        color: 'white',
-        flexShrink: 0
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontSize: '20px' }}>📷</span>
-            <span style={{ fontWeight: 600, fontSize: '16px' }}>智能黑板</span>
-          </div>
-          {config.account_username && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#a0a0b0', fontSize: '14px' }}>
-              <span>👤</span>
-              <span>{config.account_username}</span>
-            </div>
-          )}
-          {config.dept_name && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#a0a0b0', fontSize: '14px' }}>
-              <span>🏫</span>
-              <span>{config.dept_name}</span>
-            </div>
-          )}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{
-            width: '8px',
-            height: '8px',
-            borderRadius: '50%',
-            background: isOnline ? '#4ade80' : '#ef4444',
-            boxShadow: isOnline ? '0 0 8px #4ade80' : '0 0 8px #ef4444'
-          }} />
-          <span style={{ fontSize: '14px', color: isOnline ? '#4ade80' : '#ef4444' }}>
-            {isOnline ? '在线' : '离线'}
-          </span>
-        </div>
-      </div>
-
-      {/* 错误提示 */}
-      {cameraError && (
-        <div style={{
-          padding: '12px 24px',
-          background: '#7f1d1d',
-          color: '#fecaca',
-          textAlign: 'center',
-          fontSize: '14px',
-          flexShrink: 0
-        }}>
-          {cameraError}
-        </div>
-      )}
-
-      {/* 主内容区 - 摄像头预览 */}
-      <div style={{
-        flex: 1,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '16px',
-        overflow: 'hidden',
-        position: 'relative'
-      }}>
-        <div style={{
-          width: '100%',
-          height: '100%',
-          borderRadius: '12px',
-          overflow: 'hidden',
-          background: '#000',
-          boxShadow: '0 4px 24px rgba(0,0,0,0.5)',
-          position: 'relative'
-        }}>
-          {/* 摄像头预览 - 全屏大画面 */}
-          {config.capture_mode === "camera" && hasCamera && previewEnabled && !cameraError && (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
-            />
-          )}
-          {/* 屏幕截图显示 */}
-          {config.capture_mode === "screen" && currentImage && (
-            <img src={currentImage} alt="预览" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-          )}
-          {/* 无画面时 */}
-          {(!previewEnabled || cameraError || !currentImage) && (
-            <div style={{
-              width: '100%',
-              height: '100%',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexDirection: 'column',
-              gap: '16px',
-              color: '#666'
-            }}>
-              <span style={{ fontSize: '64px', opacity: 0.5 }}>{cameraError ? '⚠️' : '📷'}</span>
-              <span style={{ fontSize: '18px' }}>{cameraError ? '摄像头异常' : '正在启动...'}</span>
-            </div>
-          )}
-
-          {/* 状态浮层 - 右上角 */}
-          {statusMessage && (
-            <div style={{
-              position: 'absolute',
-              top: '16px',
-              right: '16px',
-              padding: '8px 16px',
-              background: 'rgba(0,0,0,0.7)',
-              backdropFilter: 'blur(8px)',
-              borderRadius: '8px',
-              color: '#fff',
-              fontSize: '13px',
-              border: '1px solid rgba(255,255,255,0.1)'
-            }}>
-              {statusMessage}
-            </div>
-          )}
-
-          {/* 分辨率选择器 - 左上角 */}
-          {config.capture_mode === "camera" && hasCamera && (
-            <div style={{
-              position: 'absolute',
-              top: '16px',
-              left: '16px',
-              display: 'flex',
-              gap: '8px'
-            }}>
-              <select
-                value={config.camera_resolution}
-                onChange={async (e) => {
-                  const newRes = e.target.value;
-                  setConfig({ ...config, camera_resolution: newRes });
-                  await invoke("update_config", {
-                    newConfig: { ...config, camera_resolution: newRes }
-                  });
-                  initCamera();
-                }}
-                style={{
-                  padding: '8px 12px',
-                  background: 'rgba(0,0,0,0.6)',
-                  backdropFilter: 'blur(8px)',
-                  border: '1px solid rgba(255,255,255,0.2)',
-                  borderRadius: '8px',
-                  color: '#fff',
-                  fontSize: '13px',
-                  cursor: 'pointer'
-                }}
-              >
-                <option value="480p" style={{ background: '#1a1a2e' }}>480p</option>
-                <option value="720p" style={{ background: '#1a1a2e' }}>720p</option>
-                <option value="1080p" style={{ background: '#1a1a2e' }}>1080p</option>
-              </select>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* 底部信息栏 */}
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        padding: '16px 24px',
-        background: 'linear-gradient(90deg, #1a1a2e 0%, #16213e 100%)',
-        borderTop: '1px solid rgba(255,255,255,0.1)',
-        color: 'white',
-        flexShrink: 0
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '32px' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            <span style={{ fontSize: '11px', color: '#888' }}>设备</span>
-            <span style={{ fontSize: '14px', fontWeight: 500 }}>{config.device_name || '未命名设备'}</span>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            <span style={{ fontSize: '11px', color: '#888' }}>截图间隔</span>
-            <span style={{ fontSize: '14px', fontWeight: 500 }}>{config.interval} 秒</span>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            <span style={{ fontSize: '11px', color: '#888' }}>今日截图</span>
-            <span style={{ fontSize: '14px', fontWeight: 500, color: '#4ade80' }}>{stats.todayCount} 张</span>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            <span style={{ fontSize: '11px', color: '#888' }}>最后截图</span>
-            <span style={{ fontSize: '14px', fontWeight: 500 }}>{stats.lastCaptureTime || '--:--:--'}</span>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <button
-            onClick={() => switchCaptureMode(config.capture_mode === "camera" ? "screen" : "camera")}
-            style={{
-              padding: '10px 20px',
-              background: 'rgba(255,255,255,0.1)',
-              border: '1px solid rgba(255,255,255,0.2)',
-              borderRadius: '8px',
-              color: '#fff',
-              fontSize: '14px',
-              cursor: 'pointer',
-              transition: 'all 0.2s',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px'
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.15)'}
-            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
-          >
-            {config.capture_mode === "camera" ? '📷 切截图' : '🎥 切摄像头'}
-          </button>
-          <button
-            onClick={captureFrame}
-            style={{
-              padding: '10px 20px',
-              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-              border: 'none',
-              borderRadius: '8px',
-              color: '#fff',
-              fontSize: '14px',
-              cursor: 'pointer',
-              transition: 'all 0.2s',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px'
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
-            onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
-          >
-            📸 手动截图
-          </button>
-          <button
-            onClick={() => setShowSettings(true)}
-            style={{
-              padding: '10px 20px',
-              background: 'rgba(255,255,255,0.1)',
-              border: '1px solid rgba(255,255,255,0.2)',
-              borderRadius: '8px',
-              color: '#fff',
-              fontSize: '14px',
-              cursor: 'pointer',
-              transition: 'all 0.2s'
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.15)'}
-            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
-          >
-            ⚙️ 设置
-          </button>
-        </div>
-      </div>
+      <Dashboard
+        config={config}
+        hasCamera={hasCamera}
+        actualCaptureMode={actualCaptureMode}
+        currentImage={currentImage}
+        onToggleMode={() => switchCaptureMode(actualCaptureMode === "camera" ? "screen" : "camera")}
+        onSettingsClick={() => setShowSettings(true)}
+        onLogout={() => setIsLoggedIn(false)}
+        onResolutionChange={handleResolutionChange}
+      />
 
       {/* 设置弹窗 */}
       {showSettings && (
@@ -1118,7 +989,7 @@ function App() {
           </div>
         </div>
       )}
-    </div>
+    </ThemeProvider>
   );
 }
 

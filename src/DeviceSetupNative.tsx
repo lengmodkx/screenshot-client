@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 
 // 设备类型名称
 const deviceTypeMap: Record<number, string> = {
