@@ -1528,28 +1528,29 @@ async fn push_all_running_software(state: State<'_, AppState>) -> Result<(), Str
     println!("[push_all_running_software] 开始全量推送...");
 
     // 获取配置
-    let (api_url, device_code, token, device_name, class_name, school_class_id, device_type, dept_id) = {
+    let (api_url, device_code, token, school_class_id, dept_id) = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
-        // 如果设备名称为空，使用设备类型作为默认名称
-        let final_device_name = if config.device_name.is_empty() {
-            "智能黑板".to_string() // 默认设备类型名称
-        } else {
-            config.device_name.clone()
-        };
+
+        // 验证关键字段
+        let dept_id = config.dept_id.ok_or("部门ID未配置，请先完成设备注册")?;
+        let school_class_id = config.school_class_id.ok_or("班级ID未配置，请先完成设备注册")?;
+
         (
             config.api_url.clone(),
             config.device_code.clone(),
             config.access_token.clone().unwrap_or_default(),
-            final_device_name,
-            config.class_name.clone(),
-            config.school_class_id.unwrap_or(0),
-            "智能黑板".to_string(), // 设备类型
-            config.dept_id.unwrap_or(0), // 部门ID
+            school_class_id,
+            dept_id,
         )
     };
 
     if token.is_empty() {
         return Err("未登录，无法推送软件信息".to_string());
+    }
+
+    // 验证 ID 有效性（避免使用 0 值）
+    if dept_id == 0 || school_class_id == 0 {
+        return Err(format!("部门ID({})或班级ID({})无效，请重新登录并完成设备注册", dept_id, school_class_id));
     }
 
     // 在独立线程执行进程枚举
@@ -1588,16 +1589,11 @@ async fn push_all_running_software(state: State<'_, AppState>) -> Result<(), Str
         return Ok(());
     }
 
-    // 构建请求体 - 按照API文档格式，添加设备信息和班级信息
+    // 构建请求体 - 严格按照API文档格式
     #[derive(Debug, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct BatchSoftwareRequest {
         device_code: String,
-        device_name: String,
-        device_type: String,
-        dept_id: i64,
-        class_id: i64,
-        class_name: String,
         sessions: Vec<SoftwareSessionPayload>,
     }
 
@@ -1612,15 +1608,12 @@ async fn push_all_running_software(state: State<'_, AppState>) -> Result<(), Str
         end_time: Option<i64>,
         duration_secs: i64,
         device_id: i64,
+        dept_id: i64,
+        class_id: i64,
     }
 
     let request = BatchSoftwareRequest {
         device_code: device_code.clone(),
-        device_name: device_name.clone(),
-        device_type: device_type.clone(),
-        dept_id,
-        class_id: school_class_id,
-        class_name: class_name.clone(),
         sessions: usages
             .into_iter()
             .map(|u| SoftwareSessionPayload {
@@ -1632,6 +1625,8 @@ async fn push_all_running_software(state: State<'_, AppState>) -> Result<(), Str
                 end_time: None,
                 duration_secs: 0,
                 device_id: 0,
+                dept_id,
+                class_id: school_class_id,
             })
             .collect(),
     };
@@ -1676,28 +1671,29 @@ async fn push_software_realtime(
     event_type: &str, // "started" 或 "stopped"
     session: &crate::database::SoftwareSession,
 ) -> Result<(), String> {
-    let (api_url, device_code, token, device_name, _class_name, school_class_id, device_type, dept_id) = {
+    let (api_url, device_code, token, school_class_id, dept_id) = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
-        // 如果设备名称为空，使用设备类型作为默认名称
-        let final_device_name = if config.device_name.is_empty() {
-            "智能黑板".to_string()
-        } else {
-            config.device_name.clone()
-        };
+
+        // 验证关键字段
+        let dept_id = config.dept_id.ok_or("部门ID未配置，请先完成设备注册")?;
+        let school_class_id = config.school_class_id.ok_or("班级ID未配置，请先完成设备注册")?;
+
         (
             config.api_url.clone(),
             config.device_code.clone(),
             config.access_token.clone().unwrap_or_default(),
-            final_device_name,
-            config.class_name.clone(),
-            config.school_class_id.unwrap_or(0),
-            "智能黑板".to_string(),
-            config.dept_id.unwrap_or(0), // 部门ID
+            school_class_id,
+            dept_id,
         )
     };
 
     if token.is_empty() {
         return Err("未登录".to_string());
+    }
+
+    // 验证 ID 有效性（避免使用 0 值）
+    if dept_id == 0 || school_class_id == 0 {
+        return Err(format!("部门ID({})或班级ID({})无效，请重新登录并完成设备注册", dept_id, school_class_id));
     }
 
     // 严格按照API文档构建请求体
@@ -1706,11 +1702,6 @@ async fn push_software_realtime(
     #[serde(rename_all = "camelCase")]
     struct RealtimeRequest {
         device_code: String,
-        device_name: String,
-        device_type: String,
-        dept_id: i64,
-        class_id: i64,
-        class_name: String,
         event: String,
         session: SessionPayload,
     }
@@ -1729,6 +1720,8 @@ async fn push_software_realtime(
         duration_secs: Option<i64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         device_id: Option<i64>,
+        dept_id: i64,
+        class_id: i64,
     }
 
     let session_payload = SessionPayload {
@@ -1740,15 +1733,12 @@ async fn push_software_realtime(
         end_time: session.end_time,
         duration_secs: if event_type == "stopped" { Some(session.duration_secs) } else { None },
         device_id: Some(session.device_id),
+        dept_id,
+        class_id: school_class_id,
     };
 
     let request = RealtimeRequest {
         device_code,
-        device_name,
-        device_type,
-        dept_id,
-        class_id: school_class_id,
-        class_name: _class_name,
         event: event_type.to_string(),
         session: session_payload,
     };
