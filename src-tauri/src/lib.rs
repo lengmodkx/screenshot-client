@@ -41,6 +41,7 @@ pub struct AppConfig {
     pub dept_name: String,         // 学校/部门名称
     pub access_token: Option<String>,  // 访问令牌
     pub refresh_token: Option<String>, // 刷新令牌
+    pub token_expires_at: Option<i64>, // Token 过期时间戳（毫秒）
     // 后台运行配置
     pub autostart_enabled: bool,    // 开机自启开关
     pub show_window_on_start: bool, // 启动时是否显示窗口
@@ -83,6 +84,7 @@ impl Default for AppConfig {
             dept_name: String::new(),
             access_token: None,
             refresh_token: None,
+            token_expires_at: None,
             // 后台运行默认值
             autostart_enabled: true,
             show_window_on_start: true,
@@ -503,6 +505,7 @@ async fn auto_login(state: State<'_, AppState>) -> Result<LoginData, String> {
                 let mut config = state.config.lock().map_err(|e| e.to_string())?;
                 config.access_token = Some(data.access_token.clone());
                 config.refresh_token = Some(data.refresh_token.clone());
+                config.token_expires_at = Some(data.expires_time);
                 config.dept_id = Some(data.dept_id);
                 config.dept_name = data.dept_name.clone();
                 // 不重置 is_registered 状态，保持配置文件中的原有值
@@ -822,6 +825,23 @@ async fn register_device(
 // 发送心跳
 #[tauri::command]
 async fn send_heartbeat(state: State<'_, AppState>) -> Result<bool, String> {
+    // 检查是否需要重新登录
+    let need_relogin = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+        config.access_token.is_none() || is_token_expired(&config)
+    };
+
+    if need_relogin {
+        println!("[Heartbeat] Token 过期或无效，尝试自动重新登录...");
+        match auto_login(state.clone()).await {
+            Ok(_) => println!("[Heartbeat] 自动登录成功"),
+            Err(e) => {
+                println!("[Heartbeat] 自动登录失败: {}", e);
+                return Err(format!("Token 过期且自动登录失败: {}", e));
+            }
+        }
+    }
+
     let config = state.config.lock().map_err(|e| e.to_string())?.clone();
 
     let token = config.access_token.ok_or("未登录")?;
@@ -906,14 +926,43 @@ fn resize_image_for_stream(img: &image::DynamicImage) -> image::DynamicImage {
     img.resize(new_width, new_height, image::imageops::FilterType::Lanczos3)
 }
 
+// 检查 Token 是否过期（提前5分钟刷新）
+fn is_token_expired(config: &AppConfig) -> bool {
+    const REFRESH_BUFFER_MS: i64 = 5 * 60 * 1000; // 5分钟缓冲
+
+    match config.token_expires_at {
+        Some(expires_at) => {
+            let now = chrono::Local::now().timestamp_millis();
+            now >= (expires_at - REFRESH_BUFFER_MS)
+        }
+        None => true, // 没有过期时间视为已过期
+    }
+}
+
 // 推送视频帧到服务端（按API文档实现）
 #[tauri::command]
 async fn upload_screenshot_v2(
     image_data: String,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+    // 检查是否需要重新登录
+    let need_relogin = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+        config.access_token.is_none() || is_token_expired(&config)
+    };
 
+    if need_relogin {
+        println!("[VideoPush] Token 过期或无效，尝试自动重新登录...");
+        match auto_login(state.clone()).await {
+            Ok(_) => println!("[VideoPush] 自动登录成功"),
+            Err(e) => {
+                println!("[VideoPush] 自动登录失败: {}", e);
+                return Err(format!("Token 过期且自动登录失败: {}", e));
+            }
+        }
+    }
+
+    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
     let token = config.access_token.ok_or("未登录")?;
     let device_code = config.device_code;
 
@@ -996,8 +1045,24 @@ async fn upload_screenshot_file(
     image_data: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
+    // 检查是否需要重新登录
+    let need_relogin = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+        config.access_token.is_none() || is_token_expired(&config)
+    };
 
+    if need_relogin {
+        println!("[ScreenshotUpload] Token 过期或无效，尝试自动重新登录...");
+        match auto_login(state.clone()).await {
+            Ok(_) => println!("[ScreenshotUpload] 自动登录成功"),
+            Err(e) => {
+                println!("[ScreenshotUpload] 自动登录失败: {}", e);
+                return Err(format!("Token 过期且自动登录失败: {}", e));
+            }
+        }
+    }
+
+    let config = state.config.lock().map_err(|e| e.to_string())?.clone();
     let token = config.access_token.ok_or("未登录")?;
     let device_code = config.device_code;
 
@@ -1526,6 +1591,23 @@ async fn push_all_running_software(state: State<'_, AppState>) -> Result<(), Str
     use std::sync::mpsc;
 
     println!("[push_all_running_software] 开始全量推送...");
+
+    // 检查是否需要重新登录
+    let need_relogin = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+        config.access_token.is_none() || is_token_expired(&config)
+    };
+
+    if need_relogin {
+        println!("[push_all_running_software] Token 过期或无效，尝试自动重新登录...");
+        match auto_login(state.clone()).await {
+            Ok(_) => println!("[push_all_running_software] 自动登录成功"),
+            Err(e) => {
+                println!("[push_all_running_software] 自动登录失败: {}", e);
+                return Err(format!("Token 过期且自动登录失败: {}", e));
+            }
+        }
+    }
 
     // 获取配置
     let (api_url, device_code, token, school_class_id, dept_id) = {
