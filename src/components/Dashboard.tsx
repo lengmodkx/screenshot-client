@@ -10,7 +10,6 @@ import {
   RefreshCw,
   Monitor,
   Clock,
-  Wifi,
   ChevronRight,
   HardDrive,
   Activity,
@@ -26,7 +25,7 @@ interface DashboardProps {
     account_username?: string;
     dept_name?: string;
     class_name?: string;
-    school_class_id?: number;
+    school_class_id?: number | null;
     device_code?: string;
     device_type?: string;
     is_registered: boolean;

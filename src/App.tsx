@@ -67,11 +67,6 @@ interface AppConfig {
   show_window_on_start: boolean;
 }
 
-interface Stats {
-  todayCount: number;
-  lastCaptureTime: string | null;
-}
-
 function App() {
   // App 组件渲染计数
   const appRenderCount = useRef(0);
@@ -79,7 +74,6 @@ function App() {
   
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [currentImage, setCurrentImage] = useState<string | null>(null);
-  const [stats, setStats] = useState<Stats>({ todayCount: 0, lastCaptureTime: null });
   const [showSettings, setShowSettings] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [username, setUsername] = useState("");
@@ -90,7 +84,6 @@ function App() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
   const [hasCamera, setHasCamera] = useState(true);
-  const [previewEnabled] = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [actualCaptureMode, setActualCaptureMode] = useState<"camera" | "screen">("camera");
   const [debugInfo, setDebugInfo] = useState<string>("");
@@ -476,13 +469,6 @@ function App() {
         setCurrentImage(imageData);
         currentImageRef.current = imageData;
 
-        const now = new Date();
-        const timeStr = now.toLocaleTimeString();
-        setStats(prev => ({
-          todayCount: prev.todayCount + 1,
-          lastCaptureTime: timeStr
-        }));
-
         // 推送到视频流
         if (isLoggedIn && config.is_registered && isOnline) {
           invoke("upload_screenshot_v2", { imageData })
@@ -515,13 +501,6 @@ function App() {
 
         setCurrentImage(imageData);
         currentImageRef.current = imageData;
-
-        const now = new Date();
-        const timeStr = now.toLocaleTimeString();
-        setStats(prev => ({
-          todayCount: prev.todayCount + 1,
-          lastCaptureTime: timeStr
-        }));
 
         if (isLoggedIn && config.is_registered && isOnline) {
           invoke("upload_screenshot_v2", { imageData })
