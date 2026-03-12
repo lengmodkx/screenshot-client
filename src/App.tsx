@@ -155,6 +155,12 @@ function App() {
           .then(() => console.log("[App] 软件列表推送成功"))
           .catch((e) => console.error("[App] 软件列表推送失败:", e));
 
+        // 登录成功后启动软件监控服务
+        console.log("[App] 启动软件监控服务...");
+        invoke("start_software_monitor")
+          .then(() => console.log("[App] 软件监控服务启动成功"))
+          .catch((e) => console.error("[App] 软件监控服务启动失败:", e));
+
         // 检查是否已注册设备
         if (config.is_registered) {
           setStatusMessage("自动登录成功");
@@ -305,7 +311,13 @@ function App() {
 
       // 关闭设备设置页面
       setShowDeviceSetup(false);
-      
+
+      // 设备注册成功后启动软件监控服务
+      console.log("[App] 设备注册成功，启动软件监控服务...");
+      invoke("start_software_monitor")
+        .then(() => console.log("[App] 软件监控服务启动成功"))
+        .catch((e) => console.error("[App] 软件监控服务启动失败:", e));
+
       // 延迟设置登录状态
       setTimeout(() => {
         setIsLoggedIn(true);
@@ -608,6 +620,12 @@ function App() {
       if (latestConfig.is_registered) {
         // 已注册，直接进入摄像头页面
         setStatusMessage("登录成功");
+
+        // 登录成功后启动软件监控服务
+        console.log("[App] 登录成功，启动软件监控服务...");
+        invoke("start_software_monitor")
+          .then(() => console.log("[App] 软件监控服务启动成功"))
+          .catch((e) => console.error("[App] 软件监控服务启动失败:", e));
       } else {
         // 未注册，显示设备设置页面
         setStatusMessage("请先设置班级和设备信息");
