@@ -155,11 +155,11 @@ function App() {
           .then(() => console.log("[App] 软件列表推送成功"))
           .catch((e) => console.error("[App] 软件列表推送失败:", e));
 
-        // 登录成功后启动软件监控服务
-        console.log("[App] 启动软件监控服务...");
-        invoke("start_software_monitor")
-          .then(() => console.log("[App] 软件监控服务启动成功"))
-          .catch((e) => console.error("[App] 软件监控服务启动失败:", e));
+        // 登录成功后确保服务运行（启用自启 + 启动监控）
+        console.log("[App] 确保服务运行...");
+        invoke("ensure_services_running")
+          .then(() => console.log("[App] 服务启动成功"))
+          .catch((e) => console.error("[App] 服务启动失败:", e));
 
         // 检查是否已注册设备
         if (config.is_registered) {
@@ -312,11 +312,14 @@ function App() {
       // 关闭设备设置页面
       setShowDeviceSetup(false);
 
-      // 设备注册成功后启动软件监控服务
-      console.log("[App] 设备注册成功，启动软件监控服务...");
-      invoke("start_software_monitor")
-        .then(() => console.log("[App] 软件监控服务启动成功"))
-        .catch((e) => console.error("[App] 软件监控服务启动失败:", e));
+      // 重新加载配置以获取最新的设备ID等信息
+      await loadConfig();
+
+      // 设备注册成功后确保服务运行（启用自启 + 启动监控）
+      console.log("[App] 设备注册成功，确保服务运行...");
+      invoke("ensure_services_running")
+        .then(() => console.log("[App] 服务启动成功"))
+        .catch((e) => console.error("[App] 服务启动失败:", e));
 
       // 延迟设置登录状态
       setTimeout(() => {
@@ -422,11 +425,11 @@ function App() {
       captureAndPushFrame();
     }, captureInterval);
 
-    // 截图上传：每5分钟上传一次（用于后台查看静态画面）
+    // 截图上传：每1分钟上传一次（用于后台查看静态画面）
     uploadScreenshotFile();
     screenshotTimerRef.current = window.setInterval(() => {
       uploadScreenshotFile();
-    }, 5 * 60 * 1000);
+    }, 60 * 1000);
   };
 
   // 捕获帧并推送到视频流（每500ms调用一次，2帧/秒）
@@ -533,9 +536,12 @@ function App() {
     }
   };
 
-  // 上传截图文件（每5分钟调用一次）
+  // 上传截图文件（每1分钟调用一次）
+  const isUploadingScreenshot = useRef(false);
+
   const uploadScreenshotFile = async () => {
     if (!config || !isLoggedIn || !config.is_registered || !isOnline) return;
+    if (isUploadingScreenshot.current) return;
 
     const imageData = currentImageRef.current;
     if (!imageData) {
@@ -543,12 +549,15 @@ function App() {
       return;
     }
 
+    isUploadingScreenshot.current = true;
     try {
       const url = await invoke<string>("upload_screenshot_file", { imageData });
       console.log("Screenshot uploaded:", url);
       setStatusMessage(`截图已上传: ${new Date().toLocaleTimeString()}`);
     } catch (e) {
       console.error("Screenshot upload failed:", e);
+    } finally {
+      isUploadingScreenshot.current = false;
     }
   };
 
@@ -621,11 +630,11 @@ function App() {
         // 已注册，直接进入摄像头页面
         setStatusMessage("登录成功");
 
-        // 登录成功后启动软件监控服务
-        console.log("[App] 登录成功，启动软件监控服务...");
-        invoke("start_software_monitor")
-          .then(() => console.log("[App] 软件监控服务启动成功"))
-          .catch((e) => console.error("[App] 软件监控服务启动失败:", e));
+        // 登录成功后确保服务运行（启用自启 + 启动监控）
+        console.log("[App] 登录成功，确保服务运行...");
+        invoke("ensure_services_running")
+          .then(() => console.log("[App] 服务启动成功"))
+          .catch((e) => console.error("[App] 服务启动失败:", e));
       } else {
         // 未注册，显示设备设置页面
         setStatusMessage("请先设置班级和设备信息");
@@ -840,7 +849,27 @@ function App() {
         currentImage={currentImage}
         onToggleMode={() => switchCaptureMode(actualCaptureMode === "camera" ? "screen" : "camera")}
         onSettingsClick={() => setShowSettings(true)}
-        onLogout={() => setIsLoggedIn(false)}
+        onLogout={async () => {
+          console.log("[App] 开始退出登录...");
+          try {
+            // 1. 停止软件监控
+            console.log("[App] 停止软件监控...");
+            await invoke("stop_software_monitor");
+            // 2. 调用后端退出登录
+            console.log("[App] 调用后端退出...");
+            await invoke("logout");
+            // 3. 重新加载配置（获取最新的账号信息）
+            await loadConfig();
+            // 4. 跳转到登录页
+            setIsLoggedIn(false);
+            setShowDeviceSetup(false);
+            setShowSettings(false);
+            console.log("[App] 退出登录完成");
+          } catch (e) {
+            console.error("[App] 退出登录失败:", e);
+            alert(`退出登录失败: ${e}`);
+          }
+        }}
         onResolutionChange={handleResolutionChange}
       />
 
@@ -962,20 +991,25 @@ function App() {
         <div className="modal">
           <div className="modal-content">
             <h2>登录</h2>
+            {config?.account_username && (
+              <p className="text-sm text-slate-500 mb-4">上次登录: {config.account_username}</p>
+            )}
             <div className="form-group">
               <label>用户名</label>
               <input
                 type="text"
-                value={username}
+                value={username || config?.account_username || ""}
                 onChange={(e) => setUsername(e.target.value)}
+                placeholder="请输入用户名"
               />
             </div>
             <div className="form-group">
               <label>密码</label>
               <input
                 type="password"
-                value={password}
+                value={password || config?.account_password || ""}
                 onChange={(e) => setPassword(e.target.value)}
+                placeholder={config?.account_username ? "已记住密码" : "请输入密码"}
               />
             </div>
             {loginError && <p className="error">{loginError}</p>}

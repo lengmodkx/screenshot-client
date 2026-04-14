@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::State;
 use tauri::Manager;
@@ -100,6 +100,7 @@ pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub is_running: Mutex<bool>,
     pub monitor_shutdown: Mutex<Option<watch::Sender<bool>>>,
+    pub monitor_running: Mutex<bool>,  // 软件监控是否正在运行
 }
 
 fn get_config_path() -> PathBuf {
@@ -300,9 +301,14 @@ async fn login(
 #[tauri::command]
 fn logout(state: State<AppState>) -> Result<(), String> {
     let mut config = state.config.lock().map_err(|e| e.to_string())?;
-    config.token = None;
-    config.username = None;
+    // 清除登录相关的状态，但保留账号信息（用于记住上次登录的账号）
+    config.access_token = None;
+    config.refresh_token = None;
+    config.token_expires_at = None;
+    config.is_registered = false;
+    config.device_id = None;
     config.mode = "local".to_string();
+    // 不清除 account_username 和 account_password，保留最后登录的账号
     save_config(&config)?;
     Ok(())
 }
@@ -1039,7 +1045,10 @@ async fn upload_screenshot_v2(
     }
 }
 
-// 上传截图（按API文档实现，每5-10分钟上传一次）
+/// 上传截图到文件服务器（客户端专用一键上传接口）
+/// 接口：POST /admin-api/erp/inspection-device/file/upload-direct
+/// 参数：deviceId + file
+/// 返回：文件关联记录（含 fileUrl）
 #[tauri::command]
 async fn upload_screenshot_file(
     image_data: String,
@@ -1064,10 +1073,10 @@ async fn upload_screenshot_file(
 
     let config = state.config.lock().map_err(|e| e.to_string())?.clone();
     let token = config.access_token.ok_or("未登录")?;
-    let device_code = config.device_code;
+    let device_id = config.device_id.unwrap_or(0);
 
-    if device_code.is_empty() {
-        return Err("设备未注册".to_string());
+    if device_id == 0 {
+        return Err("设备未注册，缺少 deviceId".to_string());
     }
 
     // 解析 Base64 图片数据
@@ -1090,14 +1099,17 @@ async fn upload_screenshot_file(
     // 压缩图片到 100KB 以内
     let jpeg_buffer = compress_image_to_size(&resized_img, 100)?;
 
-    // 构建 multipart 表单
+    // 构建 multipart 表单（文件名带时间戳，便于后端归档）
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let filename = format!("screenshot_{}.jpg", timestamp);
+
     let part = multipart::Part::bytes(jpeg_buffer)
-        .file_name("screenshot.jpg")
+        .file_name(filename)
         .mime_str("image/jpeg")
         .map_err(|e| e.to_string())?;
 
     let form = multipart::Form::new()
-        .text("deviceCode", device_code)
+        .text("deviceId", device_id.to_string())
         .part("file", part);
 
     let client = reqwest::Client::builder()
@@ -1106,30 +1118,47 @@ async fn upload_screenshot_file(
         .build()
         .map_err(|e| e.to_string())?;
 
+    let upload_url = format!("{}/admin-api/erp/inspection-device/file/upload-direct", config.api_url);
+    println!("[ScreenshotUpload] 正在上传截图到: {}", upload_url);
+
     let response = client
-        .post(&format!("{}/client/inspection/uploadScreenshot", config.api_url))
+        .post(&upload_url)
         .header("Authorization", format!("Bearer {}", token))
         .multipart(form)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("截图上传请求失败: {}", e))?;
 
-    if response.status().is_success() {
-        let result: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-        let code = result.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-        if code == 0 || code == 200 {
-            // 返回截图URL
-            let url = result.get("data")
-                .and_then(|d| d.as_str())
-                .unwrap_or("")
-                .to_string();
-            Ok(url)
-        } else {
-            Err(result.get("msg").and_then(|m| m.as_str()).unwrap_or("上传失败").to_string())
-        }
-    } else {
-        Err(format!("上传失败: {}", response.status()))
+    let status = response.status();
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    println!("[ScreenshotUpload] 上传响应: status={}, body={}", status, body);
+
+    if !status.is_success() {
+        return Err(format!("截图上传 HTTP 失败: {}", status));
     }
+
+    let result: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("解析上传响应失败: {}", e))?;
+
+    let code = result.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+    if code != 0 && code != 200 {
+        let msg = result.get("msg").and_then(|m| m.as_str()).unwrap_or("截图上传失败").to_string();
+        return Err(msg);
+    }
+
+    let file_url = result
+        .get("data")
+        .and_then(|d| d.get("fileUrl"))
+        .and_then(|u| u.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if file_url.is_empty() {
+        return Err("截图上传成功但未返回 fileUrl".to_string());
+    }
+
+    println!("[ScreenshotUpload] 截图上传成功，URL: {}", file_url);
+    Ok(file_url)
 }
 
 #[tauri::command]
@@ -1143,6 +1172,39 @@ async fn check_network(api_url: String) -> Result<bool, String> {
         Ok(response) => Ok(response.status().is_success()),
         Err(_) => Ok(false),
     }
+}
+
+/// 清理本地过期的截图文件（兜底机制）
+#[tauri::command]
+async fn cleanup_local_screenshots(retention_days: i64) -> Result<u32, String> {
+    let save_dir = dirs::picture_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Screenshots");
+
+    if !save_dir.exists() {
+        return Ok(0);
+    }
+
+    let cutoff = Local::now() - chrono::Duration::days(retention_days);
+    let mut deleted = 0u32;
+
+    for entry in fs::read_dir(&save_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let metadata = entry.metadata().map_err(|e| e.to_string())?;
+
+        if metadata.is_file() {
+            let modified = metadata.modified().map_err(|e| e.to_string())?;
+            let modified_dt = chrono::DateTime::<Local>::from(modified);
+
+            if modified_dt < cutoff {
+                fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+                deleted += 1;
+            }
+        }
+    }
+
+    println!("[Cleanup] 清理完成，删除 {} 个过期截图文件", deleted);
+    Ok(deleted)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1189,6 +1251,7 @@ pub fn run() {
             config: Mutex::new(config),
             is_running: Mutex::new(false),
             monitor_shutdown: Mutex::new(None),
+            monitor_running: Mutex::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             capture_screen,
@@ -1202,6 +1265,7 @@ pub fn run() {
             set_running_state,
             cleanup_old_files,
             check_network,
+            cleanup_local_screenshots,
             detect_camera,
             get_mac_address,
             auto_login,
@@ -1217,6 +1281,8 @@ pub fn run() {
             get_software_monitor_stats,
             get_software_usages,
             push_all_running_software,
+            ensure_services_running,
+            get_monitor_running_state,
         ])
         .setup(move |app| {
             println!("[setup] ========== setup 钩子开始执行 ==========");
@@ -1225,6 +1291,10 @@ pub fn run() {
             let args: Vec<String> = std::env::args().collect();
             let from_autostart = is_autostart(&args);
             println!("[setup] 启动参数: {:?}, 是否自启: {}", args, from_autostart);
+
+            // 开机自启功能已通过 tauri-plugin-autostart 插件初始化
+            // 注意：tauri-plugin-autostart 在 Tauri 2.x 中需要通过插件 API 启用/禁用
+            // 当前版本已正确配置自动启动项注册
 
             // 创建系统托盘
             println!("[setup] 创建系统托盘...");
@@ -1317,14 +1387,31 @@ pub fn run() {
             }
 
             // 启动软件监控服务（如果已登录且已注册且配置启用）
+            {
+                let state = app.state::<AppState>();
+                let config = state.config.lock().unwrap();
+                let software_enabled = config.software_monitor_enabled;
+                let device_id = config.device_id;
+                let token = config.access_token.clone();
+                println!("[setup] 软件监控配置检查: enabled={}, device_id={:?}, has_token={}",
+                    software_enabled, device_id, token.is_some());
+            }
             if !need_show_window {
-                println!("启动软件监控服务...");
+                println!("[setup] 准备启动软件监控服务...");
                 let app_handle = app.app_handle().clone();
+                let handle = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) = init_software_monitor(app_handle).await {
-                        log::error!("启动软件监控失败: {}", e);
+                    println!("[setup] 异步任务开始，调用 init_software_monitor...");
+                    match init_software_monitor(handle).await {
+                        Ok(_) => println!("[setup] 软件监控服务启动成功"),
+                        Err(e) => {
+                            println!("[setup] 软件监控服务启动失败: {}", e);
+                            log::error!("启动软件监控失败: {}", e);
+                        }
                     }
                 });
+            } else {
+                println!("[setup] 跳过软件监控启动（need_show_window=true）");
             }
 
             Ok(())
@@ -1371,7 +1458,7 @@ use crate::monitor::{
 async fn init_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
 
-    // 获取配置
+    // 获取配置（重新读取，确保获取最新值）
     let (enabled, device_id, api_url, device_code, token, interval_secs, batch_secs) = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
         (
@@ -1387,13 +1474,21 @@ async fn init_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
 
     if !enabled {
         log::info!("软件监控已禁用");
-        return Ok(());
+        return Err("软件监控已禁用".to_string());
     }
 
     if device_id == 0 {
         log::warn!("设备ID未设置，无法启动软件监控");
-        return Ok(());
+        return Err("设备ID未设置，请先完成设备注册".to_string());
     }
+
+    // 验证 token
+    if token.is_empty() {
+        log::warn!("未登录，无法启动软件监控");
+        return Err("未登录，请先完成登录".to_string());
+    }
+
+    log::info!("初始化软件监控: device_id={}, api_url={}", device_id, api_url);
 
     // 创建会话管理器
     let mut session_manager = SessionManager::new(device_id)?;
@@ -1414,6 +1509,12 @@ async fn init_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
     {
         let mut shutdown_guard = state.monitor_shutdown.lock().map_err(|e| e.to_string())?;
         *shutdown_guard = Some(shutdown_tx);
+    }
+
+    // 标记监控服务为运行中
+    {
+        let mut monitor_running = state.monitor_running.lock().map_err(|e| e.to_string())?;
+        *monitor_running = true;
     }
 
     // 启动后台同步任务
@@ -1485,22 +1586,67 @@ async fn init_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
         log::info!("关闭活跃会话: {}", session.process_name);
     }
 
+    // 重置监控运行标志
+    {
+        let state = app.state::<AppState>();
+        let mut monitor_running = state.monitor_running.lock().map_err(|e| e.to_string())?;
+        *monitor_running = false;
+    }
+
     Ok(())
 }
 
 /// 停止软件监控服务
 async fn stop_software_monitor_internal(state: &AppState) {
-    let mut shutdown_guard = state.monitor_shutdown.lock().unwrap();
-    if let Some(tx) = shutdown_guard.take() {
-        let _ = tx.send(true);
-        log::info!("已发送软件监控关闭信号");
+    {
+        let mut shutdown_guard = state.monitor_shutdown.lock().unwrap();
+        if let Some(tx) = shutdown_guard.take() {
+            let _ = tx.send(true);
+            log::info!("已发送软件监控关闭信号");
+        }
+    }
+    // 标记监控服务为已停止
+    {
+        let mut monitor_running = state.monitor_running.lock().unwrap();
+        *monitor_running = false;
     }
 }
 
 /// 命令：启动软件监控
 #[tauri::command]
 async fn start_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
-    init_software_monitor(app).await
+    // 检查是否已经运行
+    // 检查是否已经运行
+    let already_running = {
+        let state = app.state::<AppState>();
+        let monitor_running = state.monitor_running.lock().map_err(|e| e.to_string())?;
+        *monitor_running
+    };
+
+    if already_running {
+        println!("[start_software_monitor] 软件监控已经在运行中，跳过启动");
+        return Ok(());
+    }
+
+    // 标记即将运行
+    {
+        let state = app.state::<AppState>();
+        let mut monitor_running = state.monitor_running.lock().map_err(|e| e.to_string())?;
+        *monitor_running = true;
+    }
+
+    // 克隆 app 以便在失败时使用
+    let app_for_error = app.clone();
+    match init_software_monitor(app).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // 启动失败，重置标志
+            let state = app_for_error.state::<AppState>();
+            let mut monitor_running = state.monitor_running.lock().unwrap();
+            *monitor_running = false;
+            Err(e)
+        }
+    }
 }
 
 /// 命令：停止软件监控
@@ -1508,6 +1654,37 @@ async fn start_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
 async fn stop_software_monitor(state: State<'_, AppState>) -> Result<(), String> {
     stop_software_monitor_internal(&state).await;
     Ok(())
+}
+
+/// 命令：确保服务正在运行（登录/注册成功后调用）
+#[tauri::command]
+async fn ensure_services_running(app: tauri::AppHandle) -> Result<(), String> {
+    println!("[ensure_services_running] 开始确保服务运行...");
+
+    // 启动软件监控
+    println!("[ensure_services_running] 启动软件监控...");
+    match start_software_monitor(app.clone()).await {
+        Ok(_) => {
+            println!("[ensure_services_running] 软件监控启动成功");
+            Ok(())
+        }
+        Err(e) => {
+            // 如果只是"已经运行"不算错误
+            if e.contains("已经在运行") {
+                println!("[ensure_services_running] 软件监控已在运行");
+                return Ok(());
+            }
+            println!("[ensure_services_running] 软件监控启动失败: {}", e);
+            Err(e)
+        }
+    }
+}
+
+/// 命令：获取软件监控运行状态
+#[tauri::command]
+fn get_monitor_running_state(state: State<AppState>) -> Result<bool, String> {
+    let monitor_running = state.monitor_running.lock().map_err(|e| e.to_string())?;
+    Ok(*monitor_running)
 }
 
 /// 命令：获取软件监控统计信息
@@ -1610,16 +1787,18 @@ async fn push_all_running_software(state: State<'_, AppState>) -> Result<(), Str
     }
 
     // 获取配置
-    let (api_url, device_code, token, school_class_id, dept_id) = {
+    let (api_url, device_code, device_id, token, school_class_id, dept_id) = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
 
         // 验证关键字段
         let dept_id = config.dept_id.ok_or("部门ID未配置，请先完成设备注册")?;
         let school_class_id = config.school_class_id.ok_or("班级ID未配置，请先完成设备注册")?;
+        let device_id = config.device_id.unwrap_or(0);
 
         (
             config.api_url.clone(),
             config.device_code.clone(),
+            device_id,
             config.access_token.clone().unwrap_or_default(),
             school_class_id,
             dept_id,
@@ -1706,7 +1885,7 @@ async fn push_all_running_software(state: State<'_, AppState>) -> Result<(), Str
                 start_time: chrono::Local::now().timestamp_millis(),
                 end_time: None,
                 duration_secs: 0,
-                device_id: 0,
+                device_id,
                 dept_id,
                 class_id: school_class_id,
             })

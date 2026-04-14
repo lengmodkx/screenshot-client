@@ -180,9 +180,9 @@ export function Dashboard({
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 flex">
+    <div className="h-screen bg-slate-950 flex overflow-hidden">
       {/* 左侧边栏 - 设备信息 */}
-      <aside className="w-72 bg-slate-900/80 backdrop-blur-xl border-r border-slate-800 flex flex-col">
+      <aside className="w-72 h-full bg-slate-900/80 backdrop-blur-xl border-r border-slate-800 flex flex-col">
         {/* Logo & Title */}
         <div className="p-6 border-b border-slate-800">
           <div className="flex items-center gap-3">
@@ -197,7 +197,7 @@ export function Dashboard({
         </div>
 
         {/* 设备信息卡片 */}
-        <div className="flex-1 p-6 space-y-6 overflow-y-auto">
+        <div className="flex-1 p-6 space-y-6 overflow-y-auto min-h-0">
           {/* 设备状态概览 */}
           <div className="bg-gradient-to-br from-blue-500/10 to-purple-500/10 rounded-2xl p-5 border border-blue-500/20">
             <div className="flex items-center gap-2 mb-4">
@@ -368,7 +368,7 @@ export function Dashboard({
       </aside>
 
       {/* 右侧主内容区 */}
-      <main className="flex-1 flex flex-col min-w-0">
+      <main className="flex-1 flex flex-col min-w-0 h-full">
         {/* 顶部标题栏 */}
         <header className="h-16 bg-slate-900/50 backdrop-blur-xl border-b border-slate-800 flex items-center justify-between px-6">
           <div className="flex items-center gap-4">
