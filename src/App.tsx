@@ -425,11 +425,11 @@ function App() {
       captureAndPushFrame();
     }, captureInterval);
 
-    // 截图上传：每1分钟上传一次（用于后台查看静态画面）
+    // 截图上传：每5分钟上传一次（用于后台查看静态画面）
     uploadScreenshotFile();
     screenshotTimerRef.current = window.setInterval(() => {
       uploadScreenshotFile();
-    }, 60 * 1000);
+    }, 5 * 60 * 1000);
   };
 
   // 捕获帧并推送到视频流（每500ms调用一次，2帧/秒）
@@ -536,7 +536,7 @@ function App() {
     }
   };
 
-  // 上传截图文件（每1分钟调用一次）
+  // 上传截图文件（每5分钟调用一次）
   const isUploadingScreenshot = useRef(false);
 
   const uploadScreenshotFile = async () => {
