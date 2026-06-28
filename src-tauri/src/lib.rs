@@ -1131,7 +1131,8 @@ async fn upload_screenshot_file(
 
     let status = response.status();
     let body = response.text().await.map_err(|e| e.to_string())?;
-    println!("[ScreenshotUpload] 上传响应: status={}, body={}", status, body);
+    // 仅记录状态码和响应长度，避免完整 body 中可能携带的 token/敏感信息写入日志
+    println!("[ScreenshotUpload] 上传响应: status={}, body_len={}", status, body.len());
 
     if !status.is_success() {
         return Err(format!("截图上传 HTTP 失败: {}", status));
@@ -1177,8 +1178,10 @@ async fn check_network(api_url: String) -> Result<bool, String> {
 /// 清理本地过期的截图文件（兜底机制）
 #[tauri::command]
 async fn cleanup_local_screenshots(retention_days: i64) -> Result<u32, String> {
+    // 修复：避免 dirs::picture_dir() 为 None 时降级到相对当前工作目录，
+    // 否则可能从非预期目录启动时误删其他文件。
     let save_dir = dirs::picture_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .ok_or("无法获取用户图片目录")?
         .join("Screenshots");
 
     if !save_dir.exists() {
@@ -1508,14 +1511,16 @@ async fn init_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     {
         let mut shutdown_guard = state.monitor_shutdown.lock().map_err(|e| e.to_string())?;
+        // 防御性检查：避免在已有监控运行时覆盖 shutdown_tx，导致旧实例不可停止
+        if shutdown_guard.is_some() {
+            log::warn!("软件监控已在运行中（shutdown channel 已存在）");
+            return Err("软件监控已在运行中".to_string());
+        }
         *shutdown_guard = Some(shutdown_tx);
     }
 
-    // 标记监控服务为运行中
-    {
-        let mut monitor_running = state.monitor_running.lock().map_err(|e| e.to_string())?;
-        *monitor_running = true;
-    }
+    // 标记监控服务为运行中（由 start_software_monitor 原子性设置，此处无需重复）
+    // monitor_running 已在调用方正确标记
 
     // 启动后台同步任务
     tokio::spawn(run_background_sync(sync_scheduler, shutdown_rx));
@@ -1598,41 +1603,43 @@ async fn init_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
 
 /// 停止软件监控服务
 async fn stop_software_monitor_internal(state: &AppState) {
+    // 优雅处理锁中毒（避免 panic），同时不影响调用流程
     {
-        let mut shutdown_guard = state.monitor_shutdown.lock().unwrap();
-        if let Some(tx) = shutdown_guard.take() {
-            let _ = tx.send(true);
-            log::info!("已发送软件监控关闭信号");
+        let shutdown_result = state
+            .monitor_shutdown
+            .lock()
+            .map_err(|e| log::error!("获取 monitor_shutdown 锁失败: {}", e));
+        if let Ok(mut shutdown_guard) = shutdown_result {
+            if let Some(tx) = shutdown_guard.take() {
+                let _ = tx.send(true);
+                log::info!("已发送软件监控关闭信号");
+            }
         }
     }
     // 标记监控服务为已停止
     {
-        let mut monitor_running = state.monitor_running.lock().unwrap();
-        *monitor_running = false;
+        let running_result = state
+            .monitor_running
+            .lock()
+            .map_err(|e| log::error!("获取 monitor_running 锁失败: {}", e));
+        if let Ok(mut monitor_running) = running_result {
+            *monitor_running = false;
+        }
     }
 }
 
 /// 命令：启动软件监控
 #[tauri::command]
 async fn start_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
-    // 检查是否已经运行
-    // 检查是否已经运行
-    let already_running = {
-        let state = app.state::<AppState>();
-        let monitor_running = state.monitor_running.lock().map_err(|e| e.to_string())?;
-        *monitor_running
-    };
-
-    if already_running {
-        println!("[start_software_monitor] 软件监控已经在运行中，跳过启动");
-        return Ok(());
-    }
-
-    // 标记即将运行
+    // 原子性 check-and-set：避免并发调用同时通过检查导致状态损坏
     {
         let state = app.state::<AppState>();
         let mut monitor_running = state.monitor_running.lock().map_err(|e| e.to_string())?;
-        *monitor_running = true;
+        if *monitor_running {
+            println!("[start_software_monitor] 软件监控已经在运行中，跳过启动");
+            return Ok(());
+        }
+        *monitor_running = true; // 立刻在锁内设置，锁释放后标志已正确反映状态
     }
 
     // 克隆 app 以便在失败时使用
@@ -1641,9 +1648,13 @@ async fn start_software_monitor(app: tauri::AppHandle) -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(e) => {
             // 启动失败，重置标志
-            let state = app_for_error.state::<AppState>();
-            let mut monitor_running = state.monitor_running.lock().unwrap();
-            *monitor_running = false;
+            if let Ok(mut monitor_running) = app_for_error
+                .state::<AppState>()
+                .monitor_running
+                .lock()
+            {
+                *monitor_running = false;
+            }
             Err(e)
         }
     }

@@ -1007,9 +1007,11 @@ function App() {
               <label>密码</label>
               <input
                 type="password"
-                value={password || config?.account_password || ""}
+                value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={config?.account_username ? "已记住密码" : "请输入密码"}
+                placeholder={
+                  config?.account_username ? "已记住账号，请输入密码" : "请输入密码"
+                }
               />
             </div>
             {loginError && <p className="error">{loginError}</p>}
