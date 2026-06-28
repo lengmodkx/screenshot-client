@@ -203,8 +203,10 @@ impl SyncScheduler {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
 
-            // 4xx错误不重试
-            if (400..500).contains(&status) {
+            // 仅对真正不可恢复的 4xx 状态码（400 Bad Request、422 Unprocessable Entity）
+            // 放弃重试并丢弃数据。其他 4xx（401/403/408/429 等）属于临时性错误，
+            // 应走重试逻辑而不是永久丢弃。
+            if matches!(status, 400 | 422) {
                 let ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
                 self.mark_synced(&ids).await?; // 标记为已处理，不再重试
                 return Err(SyncError::Server(status, text));
@@ -264,8 +266,8 @@ impl SyncScheduler {
                         return Err(SyncError::MaxRetriesReached);
                     }
 
-                    // 指数退避等待
-                    let wait_secs = 2_u64.pow(retries);
+                    // 指数退避等待 — 使用 saturating_pow 避免 retries >= 64 时 panic 或 wrap 成 0
+                    let wait_secs = 2_u64.saturating_pow(retries);
                     sleep(Duration::from_secs(wait_secs)).await;
                 }
             }
@@ -278,6 +280,13 @@ pub async fn run_background_sync(
     mut scheduler: SyncScheduler,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
+    // 检查是否在启动前已收到关闭信号。watch::Receiver::changed() 只在值变化时返回，
+    // 如果关闭信号在函数执行前已发出，changed() 会永远阻塞。
+    if *shutdown.borrow() {
+        log::info!("启动前已收到关闭信号，跳过后台同步");
+        return;
+    }
+
     let mut interval = tokio::time::interval(Duration::from_secs(60)); // 每分钟检查一次
 
     loop {

@@ -46,18 +46,14 @@ impl SessionManager {
             }
 
             MonitorEvent::SessionSwitched { ended_session, new_session } => {
-                // 更新结束的会话
+                // 更新结束的会话并插入新会话（在同一锁作用域内连续执行）
+                // 避免 SyncScheduler 观察到中间状态：结束会话已标完成但新会话尚未插入
                 let end_time = Local::now().timestamp_millis();
                 let duration = (end_time - ended_session.start_time) / 1000;
 
                 {
                     let mut db = self.db.lock().map_err(|e| format!("获取数据库锁失败: {}", e))?;
                     db.update_session_end(&ended_session.id, end_time, duration)?;
-                }
-
-                // 插入新会话
-                {
-                    let mut db = self.db.lock().map_err(|e| format!("获取数据库锁失败: {}", e))?;
                     db.insert_session(new_session)?;
                 }
 

@@ -123,8 +123,12 @@ impl Database {
     }
 
     /// 插入新的会话记录
+    /// 使用事务将 software_sessions 和 sync_queue 的写入原子化，
+    /// 避免出现孤儿记录（已插入 software_sessions 但未入队 sync_queue）
     pub fn insert_session(&mut self, session: &SoftwareSession) -> Result<(), String> {
-        self.conn.execute(
+        let tx = self.conn.transaction().map_err(|e| format!("开始事务失败: {}", e))?;
+
+        tx.execute(
             "INSERT INTO software_sessions (id, process_name, window_title, exe_path, start_time, end_time, duration_secs, device_id, synced)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -140,8 +144,13 @@ impl Database {
             ],
         ).map_err(|e| format!("插入会话记录失败: {}", e))?;
 
-        // 同时加入同步队列
-        self.add_to_sync_queue(&session.id)?;
+        let next_retry = Local::now().timestamp_millis();
+        tx.execute(
+            "INSERT OR IGNORE INTO sync_queue (session_id, next_retry_at) VALUES (?1, ?2)",
+            params![session.id, next_retry],
+        ).map_err(|e| format!("添加到同步队列失败: {}", e))?;
+
+        tx.commit().map_err(|e| format!("提交事务失败: {}", e))?;
 
         Ok(())
     }
@@ -166,7 +175,8 @@ impl Database {
         Ok(())
     }
 
-    /// 添加到同步队列
+    /// 添加到同步队列（保留以备兼容；新代码请在事务内直接写 sync_queue）
+    #[allow(dead_code)]
     fn add_to_sync_queue(&mut self, session_id: &str) -> Result<(), String> {
         let next_retry = Local::now().timestamp_millis();
 
@@ -237,11 +247,12 @@ impl Database {
         Ok(())
     }
 
-    /// 更新重试信息
-    pub fn update_retry(&mut self, session_id: &str, retry_count: i32, next_retry_at: i64) -> Result<(), String> {
+    /// 更新重试信息：retry_count 原子递增（而不是被覆盖），next_retry_at 设置为下次重试时间
+    pub fn update_retry(&mut self, session_id: &str, _unused: i32, next_retry_at: i64) -> Result<(), String> {
+        // 使用 SQL 原子递增 retry_count，避免调用方传入的固定值覆盖历史重试次数
         self.conn.execute(
-            "UPDATE sync_queue SET retry_count = ?1, next_retry_at = ?2 WHERE session_id = ?3",
-            params![retry_count, next_retry_at, session_id],
+            "UPDATE sync_queue SET retry_count = retry_count + 1, next_retry_at = ?1 WHERE session_id = ?2",
+            params![next_retry_at, session_id],
         ).map_err(|e| format!("更新重试信息失败: {}", e))?;
 
         Ok(())

@@ -1,5 +1,5 @@
 use crate::database::SoftwareSession;
-use crate::monitor::windows_api::{get_foreground_process, ProcessInfo, should_monitor};
+use crate::monitor::windows_api::{get_foreground_process, get_system_idle_secs, ProcessInfo, should_monitor};
 use std::time::{Duration, Instant};
 
 /// 监控事件类型
@@ -163,11 +163,16 @@ impl ProcessMonitor {
         elapsed: Duration,
         idle_threshold: Duration,
     ) -> Option<MonitorEvent> {
-        let elapsed_secs = elapsed.as_secs() as i64;
+        let elapsed_secs = i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX);
+
+        // 优先使用系统级空闲检测（键盘/鼠标最后活动时间），避免窗口标题不变时被误判为闲置
+        // 例如：用户在看 PDF、IDE 中阅读代码、播放全屏视频等场景
+        let system_idle_secs = get_system_idle_secs();
+        let is_system_idle = Duration::from_secs(system_idle_secs) >= idle_threshold;
 
         // 检测闲置状态
-        if process.window_title != active.last_window_title {
-            // 窗口标题变化，重置活跃时间
+        if process.window_title != active.last_window_title && !is_system_idle {
+            // 窗口标题变化且用户实际活跃，重置活跃时间
             active.last_active_time = Instant::now();
             active.last_window_title = process.window_title.clone();
 
@@ -179,9 +184,8 @@ impl ProcessMonitor {
             });
         }
 
-        // 检查是否闲置
-        let idle_time = Instant::now().duration_since(active.last_active_time);
-        if idle_time < idle_threshold {
+        // 检查是否闲置（基于系统级空闲时间，而不是仅窗口标题）
+        if !is_system_idle {
             // 未闲置，累加使用时长
             active.total_active_secs += elapsed_secs;
 
