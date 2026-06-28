@@ -991,13 +991,26 @@ async fn upload_screenshot_v2(
     let img = image::load_from_memory(&image_bytes)
         .map_err(|e| format!("加载图片失败: {}", e))?;
 
-    println!("[VideoPush] 原始图片: {}x{} bytes, 设备: {}", img.width(), img.height(), device_code);
+    println!(
+        "[VideoPush] 原始输入: {}x{} 像素, {} 字节 base64 编码后, 设备: {}",
+        img.width(), img.height(), image_data.len(), device_code
+    );
 
     // 调整分辨率（最大1280x720）
     let resized_img = resize_image_for_stream(&img);
+    println!(
+        "[VideoPush] resize 后: {}x{} 像素",
+        resized_img.width(),
+        resized_img.height()
+    );
 
     // 压缩图片到 100KB 以内
     let jpeg_buffer = compress_image_to_size(&resized_img, 100)?;
+    println!(
+        "[VideoPush] JPEG 压缩后: {} 字节 ({:.2} KB), 目标: 100 KB",
+        jpeg_buffer.len(),
+        jpeg_buffer.len() as f64 / 1024.0
+    );
 
     // 将 JPEG 数据编码为 Base64（不包含 data:image/jpeg;base64, 前缀）
     let jpeg_base64 = base64::Engine::encode(
@@ -1007,8 +1020,15 @@ async fn upload_screenshot_v2(
 
     // 按 API 文档格式发送：deviceCode + data (Base64编码的JPEG)
     let form = multipart::Form::new()
-        .text("deviceCode", device_code)
-        .text("data", jpeg_base64);
+        .text("deviceCode", device_code.clone())
+        .text("data", jpeg_base64.clone());
+
+    println!(
+        "[VideoPush] 推流参数: deviceCode={}, data base64 长度={} 字符 ({:.2} KB)",
+        device_code,
+        jpeg_base64.len(),
+        jpeg_base64.len() as f64 / 1024.0
+    );
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -1025,8 +1045,20 @@ async fn upload_screenshot_v2(
         .map_err(|e| e.to_string())?;
 
     let status = response.status();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let body = response.text().await.map_err(|e| e.to_string())?;
-    println!("[VideoPush] API响应: status={}, body={}", status, body);
+    println!(
+        "[VideoPush] API响应: status={}, content-type={}, body_len={} 字节",
+        status,
+        content_type,
+        body.len()
+    );
+    println!("[VideoPush] API body 内容: {}", body);
 
     if status.is_success() {
         let result: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;

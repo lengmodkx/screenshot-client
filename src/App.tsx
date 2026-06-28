@@ -413,9 +413,9 @@ function App() {
     }
 
     // 根据模式设置不同的捕获间隔
-    // 摄像头模式：500ms (2fps)
+    // 摄像头模式：1000ms (1fps) - 降低频率排查视频推流「系统异常」
     // 截图模式：1000ms (1fps) - 降低频率避免卡顿
-    const captureInterval = captureModeRef.current === "camera" ? 500 : 1000;
+    const captureInterval = captureModeRef.current === "camera" ? 1000 : 1000;
 
     // 立即执行一次
     captureAndPushFrame();
@@ -432,7 +432,7 @@ function App() {
     }, 5 * 60 * 1000);
   };
 
-  // 捕获帧并推送到视频流（每500ms调用一次，2帧/秒）
+  // 捕获帧并推送到视频流（每1000ms调用一次，1帧/秒）
   const captureFrameCount = useRef(0);
   const pushSuccessCount = useRef(0);
   const pushFailCount = useRef(0);
@@ -687,7 +687,9 @@ function App() {
       clearInterval(timerRef.current);
     }
     // 根据模式设置不同的捕获间隔
-    const captureInterval = mode === "camera" ? 500 : 1000;
+    // 摄像头模式：1000ms (1fps) - 降低频率排查视频推流「系统异常」
+    // 截图模式：1000ms (1fps)
+    const captureInterval = mode === "camera" ? 1000 : 1000;
     captureFrame();
     timerRef.current = window.setInterval(() => {
       captureFrame();
